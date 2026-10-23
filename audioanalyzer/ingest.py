@@ -190,6 +190,51 @@ def capture_start_from_name(path: str | Path, tz: str | None = None) -> datetime
     return naive.astimezone()
 
 
+def coverage_ledger(infos: list, gap_warn_s: float = 2.0) -> dict:
+    """FR-2.4: what the recordings do NOT cover, stated next to every finding.
+
+    The recorder drops a few seconds at every chunk boundary, so a scan of a "full day" is
+    really a scan of 99.7% of it.  A finding dated inside a gap would be impossible, but the
+    absence of a finding is just as affected by a gap, so the ledger has to travel with the
+    report rather than being an afterthought.
+    """
+    timed = [i for i in infos if i.capture_start is not None]
+    out: dict = {
+        "files": len(infos), "timed": len(timed),
+        "audio_s": round(sum(i.duration_s for i in infos), 3),
+        "gaps": [], "overlaps": [], "untimed": [i.path for i in infos if i.capture_start is None],
+    }
+    if len(timed) < 2:
+        out.update({"wall_s": None, "coverage_pct": None, "missing_s": None,
+                    "max_gap_s": 0.0, "n_gaps": 0})
+        return out
+    timed.sort(key=lambda i: i.capture_start)
+    first = timed[0].capture_start
+    last_info = timed[-1]
+    last = last_info.capture_start
+    wall = (last + timedelta(seconds=last_info.duration_s)) - first
+    out.update({
+        "first": first.isoformat(), "last": last.isoformat(),
+        "wall_s": round(wall.total_seconds(), 3),
+    })
+    missing = wall.total_seconds() - out["audio_s"]
+    out["coverage_pct"] = round(100.0 * out["audio_s"] / max(wall.total_seconds(), 1e-9), 4)
+    out["missing_s"] = round(missing, 3)
+    for prev, nxt in zip(timed, timed[1:]):
+        end = prev.capture_start + timedelta(seconds=prev.duration_s)
+        delta = (nxt.capture_start - end).total_seconds()
+        entry = {"after": Path(prev.path).name, "at": nxt.capture_start.isoformat(),
+                 "gap_s": round(delta, 3)}
+        if delta > 0:
+            if delta > gap_warn_s:
+                out["gaps"].append(entry)
+        elif delta < -gap_warn_s:
+            out["overlaps"].append(entry)
+    out["max_gap_s"] = round(max([g["gap_s"] for g in out["gaps"]], default=0.0), 3)
+    out["n_gaps"] = len(out["gaps"])
+    return out
+
+
 def probe(path: str | Path, cfg: Config | None = None,
           progress: bool = False) -> MediaInfo:
     """Decode *path* in blocks and return its :class:`MediaInfo` (FR-1.3)."""
@@ -263,7 +308,10 @@ def probe(path: str | Path, cfg: Config | None = None,
         info.clip_level = clip_level
         info.full_scale_run_samples = longest_run
         info.peak_abs = peak
-        info.peak_count = peak_count
+        # "at-max" is a full-scale statement, so it is 0 unless something reached full scale.
+        # Counting samples equal to the peak instead reported all 480000 frames of a digital-
+        # silence file as at-max, which reads as "the whole file clipped" (FR-1.5).
+        info.peak_count = peak_count if peak >= clip_level else 0
         info.non_finite = n_nonfinite
         info.dc_offset = sum_all / max(1, info.frames)
         info.rms_dbfs = (20.0 * math.log10(math.sqrt(sum_sq / info.frames))

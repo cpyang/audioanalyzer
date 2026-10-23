@@ -1,0 +1,8 @@
+# Known noise sources. Edit by hand after walking the site.
+# f0_hz is the fundamental; harmonics within harmonic_tol_pct are labelled too.
+# Examples (commented out because they are guesses until measured here):
+# [[source]]
+# name = "mains (50 Hz) ripple"
+# f0_hz = 50.0
+# harmonics = 5
+# note = "rectified 50 Hz supply hum; appears at 100/150/200 Hz"

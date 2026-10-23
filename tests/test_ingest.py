@@ -139,3 +139,41 @@ def test_negative_full_scale_counts(tmp_path: Path):
     info = probe(path, Config())
     assert info.clipped_samples == 20
     assert info.full_scale_run_samples == 20
+
+
+def test_digital_silence_does_not_count_every_sample_as_at_max(tmp_path: Path):
+    """FR-1.5: an all-zero file has peak 0.0, so 'samples equal to the peak' = every sample.
+
+    The first implementation reported at-max = 480000 for a 30 s silent file, which reads as
+    "the whole file clipped".  at-max is a full-scale statement, so it is 0 unless something
+    actually reached full scale.
+    """
+    path = _write(tmp_path / "20260101T000000.flac", np.zeros(30 * SR, dtype=np.float32))
+    info = probe(path, Config())
+    assert info.peak_dbfs == float("-inf")
+    assert info.peak_count == 0
+    assert info.clipped_samples == 0
+    assert math.isinf(info.rms_dbfs) and info.rms_dbfs < 0
+    flags = {f["kind"] for f in info.quality_flags(Config())}
+    assert "silence" in flags              # A6 says so instead of staying quiet
+
+
+@pytest.mark.parametrize("seconds", [0.010, 0.05, 0.127, 0.128, 0.5])
+def test_files_shorter_than_a_window_are_analysed_or_declared(tmp_path: Path, seconds):
+    """FR-1.5: sub-window, exactly-one-window and slightly-over files must all exit cleanly."""
+    x = np.zeros(max(1, int(seconds * SR)), dtype=np.float32)
+    if x.size > 2048:
+        x[::7] = 0.01
+    path = _write(tmp_path / "20260101T000000.flac", x)
+    info = probe(path, Config())
+    assert abs(info.duration_s - seconds) < 1e-4
+
+
+def test_stereo_file_analyses_both_channels(tmp_path: Path):
+    """FR-1.1: multi-channel is analysed per channel then merged, tagged with `channel`."""
+    x = np.zeros((SR * 3, 2), dtype=np.float32)
+    path = tmp_path / "20260101T000000.flac"
+    sf.write(str(path), x, SR, subtype="PCM_16")
+    info = probe(path, Config())
+    assert info.channels == 2
+    assert info.duration_s == pytest.approx(3.0, abs=1e-4)

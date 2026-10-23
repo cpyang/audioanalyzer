@@ -1,6 +1,6 @@
 # Audio Anomaly Analyser — Requirements
 
-Status: v0.2 — M0 complete (venv + ingest + A6 verified); M1 plan awaiting approval
+Status: v0.3 — M0–M4 implemented and tested (62 tests green); whole-day verification in §2.3/§7.1
 Date: 2026-10-24
 Owner: (unassigned)
 Reference corpus: `/home/cpyang/Audio/20261023T070002.flac`
@@ -85,6 +85,37 @@ Consequences, all binding on the design:
   blind. 26 s blind on a 59.9 min chunk ≈ 0.74 % duty loss, per hour.
 * Worth a separate ticket on the capture side: ~4.3 min/day of missing audio points to
   underruns/SD stalls, not to a rounding convention. This tool cannot fix it, only reveal it.
+* Any event landing in those 4–27 s is **unobservable**, which is why FR-2.4 requires the
+  "not recorded" annotation rather than silence, and why `gap_tolerance_s` (FR-5.1) must exceed
+  ~30 s or a source firing every ~20 s reads as N sources instead of one.
+
+### 2.3 What the day actually contains (measured, 24 files, 2026-10-23)
+
+Whole corpus, standard mode, no `--recall`: 5023 detections in 8 m 05 s wall, 300 MB peak RSS.
+
+| class | count | what it says |
+|---|---|---|
+| A1 steady tones | **0** | nothing is phase-steady for >10 s all day |
+| A2 tone tracks | **9** | 6 in 20–100 Hz (duty 0.4–18.7 %), 3 brief mid-band events: 1318.5 Hz at 29.4 dB over floor for 15 s, 578.1 Hz, 554.9 Hz |
+| A3 impulse trains | **0** | no repeating click pattern anywhere in 24 h |
+| A4 transients | **5014** | median 182/hour (min 73, max 500); 163 broadband impacts, 4851 band-limited; z from 5.1 to 42.4 |
+| A5 sources | 4 | over 5 tonal tracks; f0 24.5 / 26.8 / 65.4 / 69.5 Hz, none with a harmonic stack |
+| coverage | 99.70 % | 258.0 s never recorded, 23 gaps, largest 26.7 s |
+
+Three conclusions, each of which changed the design:
+
+* **This is not a tone-dominated site.** §2.1's expectation of a flat broadband floor is confirmed,
+  but the information is in the *events*, not in steady lines: zero A1 in 24 hours. A tonal-first
+  tool under-delivers here, which is why A3/A4 moved from M4 to M1 (§9).
+* **Every LF "tone" the corpus produces is intermittent and needs listening.** The 20–100 Hz
+  tracks are genuinely narrowband (coherence 0.77–0.98) but have duty cycles of 0.4–18.7 % over
+  1–40 episodes. The isolation gate (FR-4.1) separates them from the region-lift artefacts that
+  used to dominate the LF end; "narrowband and coherent" is still not "a machine".
+* **5014 events/day is not a readable answer — ranking is the feature.** The report shows the top
+  40 by z with band and ring signature; the rest stays in CSV. The dominant recurring population is
+  the 88–186 Hz band: 1668 episodes across all 24 files, median gap 4.6 s. Whether that is a
+  machine cycle or foot traffic is exactly what §11 R13's listening pass must settle. **Status: not
+  listened to — these numbers are machine-truth, not ground truth.**
 
 ---
 
@@ -137,12 +168,27 @@ control; dashboards or DB backends; GUI.
 ### FR-2 Timebase
 * 2.1 Every detection has `t_offset_s` (from file start, ms precision) and ISO-8601
   `t_wall` derived from the filename timestamp (`YYYYMMDDTHHMMSS`, local TZ, override flag
-  `--tz`) with a documented offset convention.
+  `--tz`) with a documented offset convention. **Invariant:** frame *i* begins at sample
+  *i·hop*, which the streaming reader must preserve by re-reading `nperseg − hop` overlap
+  samples at every block boundary. Reading sequential blocks of `frames_per_block·hop + overlap`
+  instead — the intuitive implementation — loses `overlap` samples per block: 96 ms per 30 s
+  block here, **0.32% of the timeline, 11.4 s by the end of an hour**, and it looked like a
+  tone injected at 300–900 s being present for 598.3 s starting at 299.0 s. Regression-pinned by
+  `tests/test_timebase.py`. Timestamps are frame *centres*, so an impulse is dated to within
+  `(nperseg − hop)/2` = 48 ms in standard mode; sub-frame onset refinement is deliberately not
+  in v1 (it is an onset detector, not a timebase bug).
 * 2.2 Multi-file corpus: sort by start time, detect and report gaps/overlaps between chunks
   (this is how "the event at 07:41:12" is located across chunk boundaries). Measured on the
   2026-10-23 day: gaps 5.65–26.67 s, 258 s total (§2.2).
 * 2.3 An event that straddles a chunk boundary must be reported **once** in corpus mode
-  (dedup by frequency + wall-clock overlap), not twice.
+  (dedup by frequency + wall-clock overlap), not twice. **Implemented as two views, because the
+  two things you do with the output disagree:** the per-file CSV stays per-file (that is what
+  joins against a BMS/PLC log by file), while `corpus.build_timeline` produces the count of
+  *things* — same-frequency detections (within `max(recurrence_tol_hz, 0.5 %)`, since the
+  interpolated peak of a real tone wanders a fraction of a bin between chunks) separated by no
+  more than `gap_s` = 90 s, which must exceed the worst measured blackout (§2.2: 26.7 s) or the
+  feature splits again. Each row carries the merged entry's id in `timeline_entry`. A3/A4
+  never merge: an event is already atomic, and an A4 `freq_hz` is a band label, not a frequency.
 * 2.4 **Coverage ledger:** every corpus run emits, per hour and in total, the recorded vs
   elapsed seconds and the list of blackout intervals. Any summary line claiming "no anomalies
   in 03:00–04:00" must be accompanied by that hour's coverage figure.
@@ -151,8 +197,11 @@ control; dashboards or DB backends; GUI.
 * 3.1 STFT, Hann window, `nperseg` default 2048 (**7.8125 Hz/bin** at 16 kHz),
   `noverlap` = 3/4 (`hop` = 512 → 32 ms, 31.25 frames/s). All three are config.
 * 3.2 Two resolution modes: `--mode standard` (above, time-faithful) and `--mode hr`
-  (`nperseg` 16384 → **0.98 Hz/bin**, 1 s window) for precise tone frequency and **drift**
-  measurement — the frequency-accuracy figure of merit for source identification.
+  (`nperseg` 16384, `hop` 4096 → **0.9766 Hz/bin**, 1.024 s window, 4 frames/s) for precise tone
+  frequency and **drift** measurement — the frequency-accuracy figure of merit for source
+  identification. A window longer than a second is legal and is the whole point of `hr`; the
+  first version of the engine clamped `nperseg ≤ fs`, which silently degraded `hr` to 3.9 Hz/bin
+  (caught by `tests/test_timebase.py::test_hr_mode_reaches_its_documented_resolution`).
 * 3.3 Magnitude in dBFS (full scale = 1.0), with configurable reference for dBFS-vs-dBSPL
   (a `dbfs_offset` calibration constant; unset ⇒ dBFS, and the report must say so).
 * 3.4 Per-frame spectral peak picking with **sub-bin frequency estimation** (quadratic
@@ -163,20 +212,62 @@ control; dashboards or DB backends; GUI.
   so slow environmental change does not hide (or fake) tones.
 
 ### FR-4 Detectors
-* 4.1 A1/A2: candidate = bin whose p90 exceeds `floor_p50 + min_prominence_db` (default
-  **6.0 dB**) in ≥ `min_persistence_pct` (default **50%**) of frames within ≥ `min_tone_s`
-  (default **10 s**), and whose energy is confined to ≤3 adjacent bins.
+* 4.1 A1/A2 tonal. **Implemented as two stages and four gates**, because a single threshold was
+  shown to be unmeasurable on this data (§2.1: a bare FFT bin is Rayleigh-distributed and exceeds
+  its local floor by 6 dB in ~25% of frames with no tone present at all — 17.9 dB peaks were
+  measured on a tone-free realistic floor):
+  * *Stage 1 (mean spectrum)* — candidate = bin exceeding the **adaptive symmetric** neighbourhood
+    floor by ≥ `tone_noise_db` (default **6.0 dB**), energy confined to ≤ `max_tone_bins`
+    (**3**) adjacent bins — measured as the run within `tone_width_db` (**3 dB**) of the tone's
+    *own peak*, level ≥ `min_level_dbfs`. Averaging N frames suppresses the noise
+    spike problem by √N without holding per-frame peaks (15.6 M peaks / 2.27 GB was the
+    measured cost of the naive version). The width reference matters: defining half-height as
+    "floor + half the excess" made an 880 Hz tone at −40 dBFS disappear, because the corpus
+    floor falls ~5.5 dB/octave and a ±250 Hz window under-reads it by ~8 dB, inflating a 3-bin
+    tone to 4.
+  * *Stage 2 (per frame, candidates only)* — a frame counts as present when ALL of:
+    (a) power-smoothed tone-to-noise ≥ `tone_noise_db` over `presence_smooth_s` (2 s);
+    (b) **phase coherence** ≥ `min_coherence` (0.70) — a locked oscillator keeps
+    |⟨X·e^{-i2πft}⟩| ≈ ⟨|X|⟩, band energy collapses; measured 0.98–0.99 for injected tones
+    vs 0.28–0.55 for corpus wobble;
+    (c) **instantaneous isolation** ≥ `min_isolation_db` (4.0 dB) against the ±2..5 neighbour
+    bins, which is what separates a tone from a whole LF band lifting together.
+  * *Occurrence gate* — at least one **episode ≥ `min_tone_s` (10 s)** after merging gaps
+    < `gap_tolerance_s` (2 s). Gating on episode length rather than persistence-over-span is
+    deliberate: straggler frames 45 minutes apart otherwise stretch the span and bury a genuine
+    intermittent tone (the 65 Hz test tone scored its correct 17.3% duty and still failed a
+    50%-persistence gate).
+  `--recall` relaxes all four (3 dB / 0.5 coherence / 2 dB isolation / 2 s).
 * 4.2 Episode segmentation per frequency track: merge consecutive frames, split after
   `gap_tolerance_s` (default 2 s) of absence; a tone that never splits is "steady", otherwise
   "intermittent" with a duty cycle and an episode count.
 * 4.3 Drift: fit frequency vs time per track; report slope (Hz/min) and `r²`; classify
   `stable` (<0.5 Hz/min), `drifting`, or `stepped` (breakpoint fit).
-* 4.4 A4: per-frame broadband and per-band robust z-score against the local
-  (±`z_window_s`, default 60 s) distribution; threshold default **6σ** *and* ≥ `min_event_db`
-  (default 6 dB) absolute rise. Clipped frames are excluded from A4 (FR-1.3 flags them) so
-  clipping cannot read as a broadband transient.
-* 4.5 A3: collect A4 onset times in a band, then autocorrelate the onset impulse series over
-  0.5 s–3600 s; report best period, its confidence (peak/mean ratio), and jitter (σ of period).
+* 4.4 A4 transients: per-frame **per-band and broadband** level compared against a rolling
+  **median and MAD** of the same band over ±`z_window_s` (default 60 s, computed on a 250 ms
+  decimation for cost). An event needs **both** robust z ≥ `transient_sigma` (6) **and** absolute
+  rise ≥ `min_event_db` — which measured **15 dB**, not the 6 dB originally specified: corpus
+  frames wobble to 6–8 dB on their own, while a real impact — even one whose level sits *below*
+  the LF floor — produces a 33–53 dB rise. With 6 dB the calibration run made 13 false
+  transients out of 90 s of clean rumble, 9 of them in the final 15 s, where a `median_filter`
+  edge mode had collapsed the MAD to zero (`mode="reflect"` now). Frames containing a clipped
+  sample are excluded (FR-1.3), using a **left-aligned** window sum over the frame's hop
+  segments — a centred window flags the wrong frames and lets clipping through as a "broadband
+  impact". The top `event_detail_top` (40) events per file get a second targeted pass reporting
+  the 3 loudest spectral components during the event ("what rang", not just when). A component
+  below `cfg.min_freq` (or above 0.95·Nyquist) is **not** a ring: the first version published
+  15.62 Hz as an impact's signature frequency — the analysis filter's DC skirt — which made 10
+  ordinary low thumps read as sub-audible tones. Below `min_freq` the event keeps its band centre,
+  so the row says "band", never "tone at 15 Hz".
+* 4.5 A3 periodicity: A4's onset times per band are autocorrelated as an **inter-onset interval
+  histogram** over `comb_min_period_s`–`comb_max_period_s` (0.5 s–3600 s), boxcar-smoothed at
+  `period_smooth_s` (0.1 s) because two timestamps carry ±32 ms of frame-grid quantisation each.
+  Evidence is reported as **countable facts** — n onsets, the fraction of intervals at the
+  candidate period, jitter σ — and requires ≥ `period_min_pairs` (4) intervals,
+  ≥ `period_min_fraction` (0.15) of all intervals, and ≥ `period_min_repeats` (4) recurrences.
+  The first version ranked by peak/mean of the histogram, which scored 6740× on 16 onsets and
+  claimed three mutually exclusive periods at once; that metric is gone, `rpm` is derived from
+  the period so a 6-blade fan can be checked against a nameplate.
 * 4.6 A6: DC offset > −60 dBFS, any clipped sample, >5 s of digital silence, sample-rate
   change, duration/filename mismatch, non-finite samples.
 * 4.7 **FP control:** harmonics of *detected* anomalies are reported under their source
@@ -187,6 +278,12 @@ control; dashboards or DB backends; GUI.
 ### FR-5 Source grouping
 * 5.1 Cluster A1/A2 tracks into sources by (a) harmonic relation to a common f0
   (`harmonic_tol_pct` default 1.0%) and (b) temporal co-occurrence (Jaccard of on-time ≥ 0.6).
+  Two corrections the first whole-day run forced: **(b) is only evidence when switching exists to
+  correlate** — two steady tones are both active 100 % of an hour, giving Jaccard 1.0 and merging
+  every unrelated machine in the plant into one "source"; and **only A1/A2 participate**, because
+  an A4 event's `freq_hz` is its band's geometric centre, which merged 1178 separate impacts into
+  a single 61 Hz "source" with 1178 harmonics. `n_harmonics` now counts *distinct* harmonic
+  numbers, not members.
 * 5.2 Per-source record: id, f0 estimate + uncertainty, member frequencies with prominence,
   harmonic count, first/last seen, total active time, duty cycle, drift class,
   band-span, and a "time fingerprint" for cross-file matching.
@@ -220,7 +317,11 @@ control; dashboards or DB backends; GUI.
   legible. Also one full-recording overview figure (log-freq, matching how a human reads it).
 * 8.3 `--stdout` human summary: top-N lines, no HTML needed (for scripts and for chat relays).
 * 8.4 Exit codes: 0 clean, 1 usage, 2 unreadable/decode error, 3 detections exceed a
-  `--fail-on` severity (makes it usable as a scheduled check).
+  `--fail-on` severity (makes it usable as a scheduled check). Severity for A1/A2 is
+  `coherence × min(1, ttn/2·tone_noise_db) × min(1, 0.5+duty/100) × stability(level_std)` — a
+  product of gate margins rather than a blend of weights, so any value can be explained factor
+  by factor; A4's is `z/20`. Both `argparse` (which exits 2 on usage) and the decode path are
+  covered by `tests/test_outputs.py` — that test is how an inert `--fail-on` was found.
 * 8.5 All outputs record the tool version, the config, and the exact thresholds used
   (a report is not reproducible without them).
 
@@ -270,6 +371,22 @@ audioanalyzer version / config --dump
 | AC-8 | `report.html` opens standalone; hovering/reading any top-20 detection shows its spectrogram crop where the anomaly is visually identifiable by a human who has not seen the code |
 | AC-9 | Threshold sweep `--min-prominence {3,6,10}` changes detection counts monotonically and is logged, so FP/FN trade-off is tunable in the field without code edits |
 
+### 7.1 Verification results (measured, 2026-10-24)
+
+| AC | Result | Evidence |
+|---|---|---|
+| AC-1 | **PASS** | `scan` on the reference hour: 57 173 333 samples, DC −38.25 dBFS, 375 samples at \|x\|=1.0, 464 at the top PCM code, 26.5 ms flat-top run — all four agree with ffmpeg/MediaInfo independently. Zero detections in bin 0 (the DC notch in `block_db`/`block_spectrum` leaves ≤ −163 dBFS residue there) |
+| AC-2 | **REFUTED — rewritten from measured truth, as this AC's own clause requires** | There is **no line at 6.8–7.0 kHz**. Mean spectrum: max −91.4 dBFS in 6800–7000 Hz against a −95.4 dBFS local median (a 4 dB ripple in the floor), and 62 dB below the loudest feature in the file (70 Hz at −53.0 dBFS). The M1 detector confirms it: **0 candidate bins** in the reference hour. The visual "line" was an artefact of reading a log-freq PNG |
+| AC-3 | **mechanism PASS, corpus finding NIL** | Synthetic: a 10-click train at 7.5 s is recovered at 7.5 ±0.4 s (±5%) with 10 onsets. On the real recordings: the 5–6.5 kHz "comb" is likewise refuted — **0 of 192 bins** in that band exceed their local median by 6 dB |
+| AC-4 | **PASS on synthetic; real-audio FP rate not yet ear-validated** | 10 injected clicks at −20 dBFS → 10/10 found, dated within 48 ms (the frame-centre quantum, < the ±0.2 s target); 0 false transients in 90 s of corpus-shaped rumble after calibration. On one real hour A4 reports 73–205 events/hour with named ring frequencies — plausible machinery, unlistened |
+| AC-5 | **PASS** | 50/100/150/1000 Hz stack ⇒ exactly one source, f0 = 50 Hz ±0.5, members grouped by harmonic fit; no spurious sources |
+| AC-6 | **PASS** | `compare` against a profile built from the same audio without a 1750 Hz tone lists **only** that tone as new; identical audio lists nothing new and nothing gone (band deltas < 0.05 dB) |
+| AC-7 | **PASS** | A tone injected at exactly 300–900 s is dated `0:05:00` for `600.2 s` in a 3573 s file. This AC is what caught the 0.32% streaming timebase bug (§11 R11) — the same run had previously said `0:04:59` for `598.3 s` |
+| AC-8 | **open — needs a human** | `report.html` is written self-contained (figures as base64, no external refs — asserted in `tests/test_known.py`); whether a non-programmer can identify an anomaly in a crop has to be judged by you |
+| AC-9 | **PASS** | `test_threshold_sweep_is_monotonic`: counts never increase as the gate tightens, logged per step |
+
+Whole-day throughput and memory (NFR-4/5): **see §2.3** for the census and totals.
+
 ---
 
 ## 8. Deliverables & layout
@@ -277,21 +394,27 @@ audioanalyzer version / config --dump
 ```
 /home/cpyang/Audio/
   REQUIREMENTS.md            this document
+  README.md                  quick start + worked examples
   .venv/                     uv-managed, python 3.12  (created in M0)
-  pyproject.toml             metadata + console-script, optional [dev] extras
+  pyproject.toml             metadata + console-script, [report]/[dev] extras
   requirements.lock          pinned exact versions for reproducible offline installs
-  README.md                  10-line quick start + 1 worked example
+  known.toml                 hand-edited source library (created by `audioanalyzer known --add`)
   audioanalyzer/
-    __init__.py  __main__.py cli.py config.py
-    ingest.py       block decoder, MediaInfo, data-quality checks (A6)
-    spectral.py     STFT blocks, dB, peak pick + sub-bin freq, streaming floor model
-    baseline.py     per-bin p50/p90, time-blocked, save/load .npz profile
-    detectors/      tonal.py  episodes.py  transient.py  comb.py  sources.py
-    corpus.py       multi-file timeline, dedup, recurrence/periodicity, known.toml
-    report.py       matplotlib figures (Agg, no GUI) + HTML assembly
-    synth.py        test-signal generator (tones/clicks/combs) for AC-4/5
-  tests/            test_spectral.py test_detectors.py test_timebase.py test_golden.py
-  out/              per-run artifacts (git-ignored)
+    __init__.py  __main__.py cli.py config.py models.py
+    ingest.py       block decoder, MediaInfo, A6 flags, coverage ledger (FR-1/2/4.6)
+    spectral.py     STFT engine, dB, DC notch, aggregate + candidate stage 1 (FR-3)
+    baseline.py     per-bin p50/p90 histograms, time-blocked, save/load .npz (FR-3.5/3.6)
+    scan.py         single-file pipeline (stage 1 → candidates → stage 2 → detectors)
+    detectors/      tonal.py (A1/A2)  transients.py (A4)  periodicity.py (A3)  sources.py (A5)
+    profile.py      floor profiles + compare mode (FR-6)
+    known.py        known-source naming + cross-chunk recurrence (FR-7.2/7.3)
+    report.py       CSV/JSON writers (FR-8.1)
+    plots.py        spectrogram/waveform figures, Agg, no GUI (FR-8.2)
+    report_html.py  self-contained HTML report (FR-8.2/8.5)
+    synth.py        corpus-calibrated test signals: rumble, add_tone, add_click (AC-2/4/5)
+  tests/            test_ingest  test_spectral  test_detectors  test_transients
+                    test_profile  test_known  test_timebase          — 62 tests
+  out/              per-run artifacts: detections.csv, scan.json, report.html (git-ignored)
 ```
 
 ---
@@ -309,13 +432,37 @@ audioanalyzer version / config --dump
   `SoundFile.extrainfo` reference (→ `extra_info`, parsed for Vorbis comments) and a clip
   threshold of `1-2**-16` that sat above the top s16 code and therefore counted nothing
   (→ `1-2**(1-bits)`; see §2 and R6).
-* **M1 (0.5 day)** — ingest + spectral + A6 + **A1/A2 tonal** + CSV. **Pays off immediately:**
-  confirms/refutes AC-2 with real numbers and gives the first ranked anomaly list.
-* **M2 (0.5 day)** — A5 source grouping + `hr` mode + drift + HTML report with crops (AC-5, AC-8).
-* **M3 (0.5 day)** — A4 transients + A3 comb/period + `profile`/`compare` (AC-3, AC-4, AC-6).
-* **M4 (0.5 day)** — corpus/wall-clock merge, recurrence analysis, `known.toml`, threshold sweep
-  + FP tuning against a labelled 2 h of recordings (AC-7, AC-9), README.
+* **M1 (0.5 day) — DONE 2026-10-24.** Spectral engine + A1/A2/A5 + CSV. The first attempt
+  picked peaks per frame and needed 15.6 M peaks, 2.27 GB RSS and 112 s per file to report one
+  detection; the shipped design is **two stages** (mean-spectrum candidates → targeted per-frame
+  persistence/coherence), which costs 189 MB and 6.0 s for stage 1. Four gates, all calibrated
+  against measured behaviour (FR-4.1): smoothed tone-to-noise, phase coherence, instantaneous
+  isolation, and a ≥10 s episode. AC-2's "6.8–7.0 kHz line" is **refuted** (§7.1), and the
+  reference hour reports **0 candidate bins**.
+* **M2 (0.5 day) — DONE 2026-10-24.** `--mode hr` (and the `nperseg ≤ fs` clamp that had silently
+  made it 3.9 Hz/bin instead of 0.98 — fixed, regression-pinned), drift classification, A5 source
+  grouping across a whole selection, nearest-neighbour annotation (FR-4.7), HTML report with
+  embedded crops (FR-8.2), and the **0.32% streaming timebase bug** found via AC-7 (§11 R11) —
+  the most consequential fix of the build: every timestamp before it was ~11 s wrong per hour.
+* **M3 (0.5 day) — DONE 2026-10-24.** A4 transients (median/MAD against ±60 s local baseline,
+  clipped frames excluded, `min_event_db` recalibrated 6→15 dB from measurement) and A3
+  periodicity (inter-onset histogram; the peak/mean metric that claimed 6740× confidence is
+  gone). `profile`/`compare` land here too: a tone injected into one file and absent from the
+  reference is the only thing `compare` reports, and nothing else (§7.1 AC-6).
+* **M4 (0.5 day) — DONE 2026-10-24.** Corpus merge + coverage ledger in every output (FR-2.4),
+  recurrence across chunks with hour-of-day clustering (FR-7.2) including an explicit
+  "single-day corpus, day-of-week not computable" note, `known.toml` naming (FR-7.3), threshold
+  sweep monotonicity (AC-9), README. **85 tests green.** The corpus timeline (FR-2.3) landed here
+  too, as a *second view*: per-file CSV stays per-file for BMS joins, while `build_timeline`
+  answers "how many things were there" — a tone crossing an hour seam reads as one feature in
+  `n_files` chunks rather than two detections.
+* **Definitive whole-day pass (v0.2.0, 2026-10-24):** `scan .` over 24 files → 5023 detections in
+  **8 m 05 s**, **300 MB** peak RSS (NFR-4/5 met; the earlier 1336 s run had been ~2 passes/file
+  plus an O(n²) merge), CSV + JSON + a 1.78 MB self-contained HTML report. Census in §2.3.
 * **M5 (later)** — cross-night trending, optional ML classifier, capture-side integration.
+  Before any of that: the **listening calibration** (R13) and a **multi-night corpus** (FR-7.2's
+  day-of-week claim is not testable on one day), because the numbers in §2.3 are machine-truth
+  and the false-positive rate against real ground truth is still unmeasured.
 
 ---
 
@@ -352,7 +499,7 @@ Still open (do not block M1 on these):
 
 | ID | Risk | Mitigation |
 |---|---|---|
-| R1 | An "anomaly" is just the floor's own variance (FFT leakage from the loud DC–500 Hz band leaking upward and faking high-band tones — Hann sidelobes are −31 dB) | Window selection + leakage estimate in the baseline model; require `prominence > floor_variance + margin`; test with the real floor, not white noise |
+| R1 | An "anomaly" is just the floor's own variance (FFT leakage from the loud DC–500 Hz band leaking upward and faking high-band tones — Hann sidelobes are −31 dB) | Window selection + leakage estimate in the baseline model; require `prominence > floor_variance + margin`; test with the real floor, not white noise. **Now three explicit gates instead of one margin:** a per-frame sliding-mean DC notch (measured residue ≤ −163 dBFS in bins 1–3), per-bin adaptive floor windows, and an instantaneous ±39 Hz isolation test. A fourth was needed for the top of the band: see **R11** |
 | R2 | Mains-hum harmonics (50/60 Hz + comb) dominate the low band and bury real findings | A5 harmonic grouping, per-band suppression, and `known.toml` naming so hum is *stated*, not repeated 40× |
 | R3 | 16 kHz decimation without a proper anti-alias filter means sub-Nyquist "tones" could be aliases of >8 kHz switching noise (SoX tag ⇒ chain unknown) | Flag in report; `hr` mode + drift signature (aliases drift with playback rate, true tones do not); recommend recording at 48 kHz for confirmation sweeps |
 | R4 | A steady tone is actually a property of the recorder (self-noise, PLL spur) not the site | Baseline profile from a known-quiet/"dummy" recording ⇒ recorder artefacts disappear from `compare` output |
@@ -362,6 +509,9 @@ Still open (do not block M1 on these):
 | R8 | Time-axis misattribution ⇒ engineer walks to the wrong place / wrong shift | AC-7 + explicit `--tz`, chunk-gap detection, both-offset-and-wall-clock in every row |
 | R9 | Python 3.14 chosen by accident ⇒ wheel gaps (e.g. scipy/numpy cp314 availability is newer) | Pin `--python 3.12` in M0 and in `pyproject.toml` (`requires-python = ">=3.10,<3.13"` until 3.13 wheels are proven here) |
 | R10 | **Capture blackout (measured §2.2):** 258 s/day, up to 26.7 s in one gap, so quiet or brief sources can be missed entirely and an "all clear" report can be wrong | Coverage ledger in every report (FR-2.4); gap-aware period search (FR-7.2); severity wording never says "no anomalies", only "none detected in the 99.7 % covered". Raise a capture-side ticket for the underruns |
+| R11 | **Streaming timebase drift** — any block reader that treats chunks as independent while computing frame times as `i·hop` loses the window overlap per block. Silent (0.32%/hour here), and every downstream stat inherits it | Invariant pinned by `tests/test_timebase.py` (frame count closed form + impulse dating in a 3 s-block file). `iter_blocks` re-reads `nperseg − hop` overlap per chunk. Class of bug to suspect first in any new reader |
+| R12 | **Coherent artefacts that no gate can reject:** the resampling spur at Nyquist scores phase coherence 0.97 — indistinguishable from a motor whine by measurement alone | Explicit `nyquist_guard = 0.98` band exclusion (R1/R3), reported as a guard rather than hidden; `known.toml` naming for what the site says these lines are; confirmation sweep at 48 kHz if a near-band-edge line ever matters |
+| R13 | A4's real-audio false-positive rate is unmeasured — synthetic rumble says 0/hour, one real hour said 73–205/hour | Report events per hour and per band so the noise is visible; `--class tonal` to suppress; needs a labelled ~2 h listening pass to set the operating point |
 
 ---
 
