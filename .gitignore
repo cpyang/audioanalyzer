@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+out/
+.probe/
+*.npz
+
+# Recordings never go in git: 1.1 GB of FLAC stays on the capture disk.
+# The tool reads them by path; tests generate their own synthetic fixtures.
+*.flac
+*.wav
+*.ogg
+*.mp3
