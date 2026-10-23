@@ -91,14 +91,16 @@ Consequences, all binding on the design:
 
 ### 2.3 What the day actually contains (measured, 24 files, 2026-10-23)
 
-Whole corpus, standard mode, no `--recall`: 5023 detections in 8 m 05 s wall, 300 MB peak RSS.
+Whole corpus, standard mode, no `--recall`: **5023 detections in 8 m 04 s, 309 MB peak RSS**
+(NFR-4 asks 10 min/day under 400 MB — both met; the earlier 1336 s run had been an extra pass per
+file plus an O(n²) corpus merge, both fixed).
 
 | class | count | what it says |
 |---|---|---|
 | A1 steady tones | **0** | nothing is phase-steady for >10 s all day |
-| A2 tone tracks | **9** | 6 in 20–100 Hz (duty 0.4–18.7 %), 3 brief mid-band events: 1318.5 Hz at 29.4 dB over floor for 15 s, 578.1 Hz, 554.9 Hz |
+| A2 tone tracks | **9** | 6 in 24.5–69.5 Hz (duty 2.2–18.7 %), 3 brief mid-band: 1318.5 Hz at 29.4 dB over floor for 15 s, 578.1 Hz, 554.9 Hz; coherence 0.77–0.98, isolation 5.3–19.1 dB. **Steady: 0, intermittent: 9** |
 | A3 impulse trains | **0** | no repeating click pattern anywhere in 24 h |
-| A4 transients | **5014** | median 182/hour (min 73, max 500); 163 broadband impacts, 4851 band-limited; z from 5.1 to 42.4 |
+| A4 transients | **5014** | 23.4 Hz–5.96 kHz, z 0.5–42.4 (median 8.9); 163 broadband impacts, 4851 band-limited; median 182/hour (min 73, max 500) |
 | A5 sources | 4 | over 5 tonal tracks; f0 24.5 / 26.8 / 65.4 / 69.5 Hz, none with a harmonic stack |
 | coverage | 99.70 % | 258.0 s never recorded, 23 gaps, largest 26.7 s |
 
@@ -107,15 +109,22 @@ Three conclusions, each of which changed the design:
 * **This is not a tone-dominated site.** §2.1's expectation of a flat broadband floor is confirmed,
   but the information is in the *events*, not in steady lines: zero A1 in 24 hours. A tonal-first
   tool under-delivers here, which is why A3/A4 moved from M4 to M1 (§9).
-* **Every LF "tone" the corpus produces is intermittent and needs listening.** The 20–100 Hz
-  tracks are genuinely narrowband (coherence 0.77–0.98) but have duty cycles of 0.4–18.7 % over
-  1–40 episodes. The isolation gate (FR-4.1) separates them from the region-lift artefacts that
-  used to dominate the LF end; "narrowband and coherent" is still not "a machine".
+* **Every LF "tone" the corpus produces is intermittent and needs listening.** The 24.5–69.5 Hz
+  tracks are genuinely narrowband (coherence 0.77–0.98, isolation up to 19.1 dB) but have duty
+  cycles of 2.2–18.7 % over 4–19 episodes. The isolation gate (FR-4.1) separates them from the
+  region-lift artefacts that used to dominate the LF end; "narrowband and coherent" is still not
+  "a machine".
 * **5014 events/day is not a readable answer — ranking is the feature.** The report shows the top
   40 by z with band and ring signature; the rest stays in CSV. The dominant recurring population is
   the 88–186 Hz band: 1668 episodes across all 24 files, median gap 4.6 s. Whether that is a
   machine cycle or foot traffic is exactly what §11 R13's listening pass must settle. **Status: not
   listened to — these numbers are machine-truth, not ground truth.**
+
+Recurrence (FR-7.2) reports 9 signatures over this single day with an explicit note that day-of-week
+correlation is not computable from one day. What it does say is checkable: the dominant event bands
+are spread across the whole 24 h (phase spread 1.9–3.5 h circular, i.e. **not** clock-locked), which
+is what ambient site activity looks like, whereas a scheduled machine would cluster at one hour.
+Only one tonal signature cleared the 3-episode floor (24.76 Hz, 3 episodes, phase 16.2 h ± 0.96).
 
 ---
 
