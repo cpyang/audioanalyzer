@@ -139,7 +139,9 @@ Then, after listening:
 Design constraints worth knowing, since they are the difference between a tool and a rumor mill:
 
 * Candidates go to `known.candidates.toml`, **never** into the live library. A name claims what
-  physical object makes a sound; only a walk confirms that.
+  physical object makes a sound; only a walk confirms that. Each run **rewrites** that file — a
+  stale list from an earlier run must not sit one `--promote` away from the library, and the printed
+  indices have to mean what the file contains (`--candidates FILE --append` opts into accumulating).
 * A candidate's `f0_hz` is always an **observed** line. Fundamentals are never inferred — the
   harmonic f0 fitter once produced "a 5.04 Hz machine" from three 25 Hz tracks, and a generated
   library would have propagated that into every report afterwards.
@@ -180,7 +182,7 @@ every output, because a report you cannot reproduce is a rumour.
 ## Tests
 
 ```bash
-.venv/bin/python -m pytest tests -q        # 116 tests, ~90 s, no audio files needed
+.venv/bin/python -m pytest tests -q        # 121 tests, ~90 s, no audio files needed
 ```
 
 Ground truth is injected and recovered: a tone added at 300–900 s comes back dated `0:05:00` for

@@ -1,6 +1,6 @@
 # Audio Anomaly Analyser — Requirements
 
-Status: v0.4 — M0–M4 implemented and tested (116 tests green); whole-day verification in §2.3/§7.1
+Status: v0.4 — M0–M4 implemented and tested (121 tests green); whole-day verification in §2.3/§7.1
 Date: 2026-10-24
 Owner: (unassigned)
 Reference corpus: `/home/cpyang/Audio/20261023T070002.flac`
@@ -526,6 +526,12 @@ Whole-day throughput and memory (NFR-4/5): **see §2.3** for the census and tota
   measured case against a day spectrogram is in FR-8.2b) and `known --seed`, which proposes the
   always-present sounds. On this corpus the seeder's answer is **none**, and it now says so with
   evidence rather than printing an empty table. **116 tests green.**
+* **v0.4.1 (2026-10-24):** stale-candidate safety. A zero-candidate seed run returned *without*
+  rewriting `known.candidates.toml`, so the 16 bogus entries the pre-fix ridge estimator had
+  written stayed on disk one `--promote` away from the live library. Candidate files are now
+  rewritten by every run (opt-in `--append` to accumulate), which also repairs the index contract —
+  `promote` indexes file positions while the printed table numbers come from the current run.
+  **121 tests green.**
 * **M5 (later)** — cross-night trending, optional ML classifier, capture-side integration.
   Before any of that: the **listening calibration** (R13) and a **multi-night corpus** (FR-7.2's
   day-of-week claim is not testable on one day), because the numbers in §2.3 are machine-truth

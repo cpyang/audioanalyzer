@@ -112,7 +112,9 @@ def build_parser() -> argparse.ArgumentParser:
     k.add_argument("--seed", nargs="+", type=Path, default=None, metavar="RECORDING...",
                    help="propose candidates from what is always present in these recordings")
     k.add_argument("--candidates", type=Path, default=Path("known.candidates.toml"),
-                   help="where --seed writes proposals (never the live library)")
+                   help="where --seed writes proposals (never the live library; rewritten each run)")
+    k.add_argument("--append", action="store_true",
+                   help="accumulate candidates across runs instead of rewriting the file")
     k.add_argument("--min-file-frac", type=float, default=None, dest="seed_min_file_frac",
                    help="fraction of the fed recordings a sound must appear in (default "
                         f"{Config().seed_min_file_frac:g})")
@@ -492,9 +494,14 @@ def main(argv: list[str] | None = None) -> int:
                                     progress=lambda i, n, p: print(
                                         f"  [{i}/{n}] {Path(p).name}", file=sys.stderr, flush=True))
             if not cands:
+                # Replace any previous candidate file: a stale list from an earlier (or buggy) run
+                # is otherwise one `--promote` away from the live library.
+                cleared = write_candidates(args.candidates, [], append=args.append)
                 print(f"no always-present sound found in {st.get('files_total', 0)} recording(s): "
-                      f"nothing appeared in ≥{cfg.seed_min_file_frac:.0%} of them.\n"
-                      f"  examined {st.get('examined', {}).get('line', 0)} distinct line(s) and "
+                      f"nothing appeared in ≥{cfg.seed_min_file_frac:.0%} of them.")
+                print(f"  {cleared} rewritten with 0 candidates "
+                      "(any previous list is cleared, so --promote cannot pick up stale entries)")
+                print(f"  examined {st.get('examined', {}).get('line', 0)} distinct line(s) and "
                       f"{st.get('examined', {}).get('ridge', 0)} floor ridge(s) across the files")
                 bf = st.get("best_file_frac", {})
                 print(f"  best agreement seen: line {bf.get('line', 0):.0%} of files, "
@@ -505,7 +512,7 @@ def main(argv: list[str] | None = None) -> int:
                       "REQUIREMENTS.md §2.3 says exactly that here (0 steady A1 tones in 24 h). "
                       "Lower --min-file-frac to see the runners-up.")
                 return 0
-            p = write_candidates(args.candidates, cands)
+            p = write_candidates(args.candidates, cands, append=args.append)
             print(f"\n  {'#':>3} {'Hz':>9}  {'kind':6}{'files':>7}{'duty%':>7}{'over dB':>8}"
                   f"{'dBFS':>8}  harmonics")
             for i, c in enumerate(cands, 1):
