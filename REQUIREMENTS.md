@@ -461,12 +461,12 @@ Whole-day throughput and memory (NFR-4/5): **see §2.3** for the census and tota
 * **M4 (0.5 day) — DONE 2026-10-24.** Corpus merge + coverage ledger in every output (FR-2.4),
   recurrence across chunks with hour-of-day clustering (FR-7.2) including an explicit
   "single-day corpus, day-of-week not computable" note, `known.toml` naming (FR-7.3), threshold
-  sweep monotonicity (AC-9), README. **85 tests green.** The corpus timeline (FR-2.3) landed here
+  sweep monotonicity (AC-9), README. **86 tests green.** The corpus timeline (FR-2.3) landed here
   too, as a *second view*: per-file CSV stays per-file for BMS joins, while `build_timeline`
   answers "how many things were there" — a tone crossing an hour seam reads as one feature in
   `n_files` chunks rather than two detections.
 * **Definitive whole-day pass (v0.2.0, 2026-10-24):** `scan .` over 24 files → 5023 detections in
-  **8 m 05 s**, **300 MB** peak RSS (NFR-4/5 met; the earlier 1336 s run had been ~2 passes/file
+  **8 m 04 s**, **309 MB** peak RSS (NFR-4/5 met; the earlier 1336 s run had been ~2 passes/file
   plus an O(n²) merge), CSV + JSON + a 1.78 MB self-contained HTML report. Census in §2.3.
 * **M5 (later)** — cross-night trending, optional ML classifier, capture-side integration.
   Before any of that: the **listening calibration** (R13) and a **multi-night corpus** (FR-7.2's
