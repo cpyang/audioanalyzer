@@ -1,6 +1,6 @@
 # Audio Anomaly Analyser — Requirements
 
-Status: v0.3 — M0–M4 implemented and tested (97 tests green); whole-day verification in §2.3/§7.1
+Status: v0.4 — M0–M4 implemented and tested (116 tests green); whole-day verification in §2.3/§7.1
 Date: 2026-10-24
 Owner: (unassigned)
 Reference corpus: `/home/cpyang/Audio/20261023T070002.flac`
@@ -108,7 +108,10 @@ Three conclusions, each of which changed the design:
 
 * **This is not a tone-dominated site.** §2.1's expectation of a flat broadband floor is confirmed,
   but the information is in the *events*, not in steady lines: zero A1 in 24 hours. A tonal-first
-  tool under-delivers here, which is why A3/A4 moved from M4 to M1 (§9).
+  tool under-delivers here, which is why A3/A4 moved from M4 to M1 (§9). It also means **there is
+  nothing honest to seed `known.toml` with**: `known --seed .` over the same 24 files examined 6
+  recurring lines and rejected all of them — best cross-file agreement 17% (4/24 files), highest
+  duty 17% — and found 0 floor ridges once the anti-alias knee was excluded (FR-7.3b).
 * **Every LF "tone" the corpus produces is intermittent and needs listening.** The 24.5–69.5 Hz
   tracks are genuinely narrowband (coherence 0.77–0.98, isolation up to 19.1 dB) but have duty
   cycles of 2.2–18.7 % over 4–19 episodes. The isolation gate (FR-4.1) separates them from the
@@ -313,6 +316,23 @@ control; dashboards or DB backends; GUI.
   and day-of-week correlation. This is the "track down the source" payoff.
 * 7.3 Known-source library (`known.toml`): name → expected frequency/f0 + tolerance + notes.
   Matches are labelled by name in all outputs; unmatched detections stay "UNKNOWN".
+  Labelling is **annotation only** — no code path filters on a known match — so a wrong entry
+  degrades a label, it cannot hide a finding. That is what makes auto-seeding safe enough to offer.
+* 7.3b **Seeding the library from a recording** (`known --seed RECORDING...`): proposes the sounds
+  that are *essentially always present*, so they stop being findings and become site fingerprint.
+  Two criteria, because one is not enough — **lines** (narrowband tracks, reported with their
+  measured duty cycle) and **floor ridges** (bumps in the median spectrum standing above a locally
+  fitted power-law trend). The ridge criterion is not decoration: the reference day contains
+  **zero A1 steady tones**, so a duty-only seeder would correctly answer "nothing is always
+  present" and be useless. Its trend must be a **fit, not a window median** — the floor tilts
+  ~5.5 dB/octave, and a median across the knee at ~150 Hz under-reads the real 125 Hz feature
+  (+5.1 dB measured by median against +7.3 dB by fit, with flanking bins at −2.1 and −1.1). A pure
+  power law must yield no candidates, which is a test, not a hope (`tests/test_seed.py`).
+  A candidate's `f0_hz` is always an **observed** line; fundamentals are never inferred here,
+  because `infer_f0` on three 25 Hz tracks once invented "a 5.04 Hz machine" and a generated
+  library would propagate such a claim into every later report. Output goes to
+  `known.candidates.toml`, and promotion (`--promote --index 1,3 --rename 1='CRH-3 fan'`) is the
+  human step: a name asserts what physical object makes the sound, and only a walk can confirm that.
 * 7.4 Export a detection CSV/JSON suitable for joining against external event logs
   (PLC/BMS/pump schedules) — the tool must not require those logs, only be joinable.
 
@@ -321,9 +341,22 @@ control; dashboards or DB backends; GUI.
   `detections.jsonl` / `summary.json` (per file: media info, config echo, sources,
   detections, data-quality flags).
 * 8.2 `report.html`: self-contained, sortable table (freq, span, time, level, prominence,
-  class, source, confidence) + one figure per top-N detection: a dB-colourmap spectrogram
+  class, coherence, isolation, source, known-name, confidence) plus, for the top figures, a
   crop (±30 s, ±1 kHz; y-axis in Hz) and a 1 s waveform zoom, so noise floor vs tone is
   legible. Also one full-recording overview figure (log-freq, matching how a human reads it).
+  **The overview colours by dB over an adaptive frequency floor, not absolute dBFS**: on the
+  reference hour the LF→HF slope of the noise floor accounts for **95.8 % of the image variance**
+  while the informative residual spans only −3.1..+12.5 dB, so an absolute window buries every real
+  feature; percentile windows were worse still (the bottom 2 % of cells are numerical dust from
+  masked bins, which put vmin at −122 dBFS, 28 dB below the genuine floor).
+* 8.2b **Day map** (`daymap.svg`, embedded at the top of the report): time of day on x, log-frequency
+  lanes on y, one cell per minute × lane, coloured by the highest dB-over-floor seen there (robust z
+  for impacts), with the top tone tracks labelled and **unrecorded intervals hatched**. This exists
+  because a day-long spectrogram cannot answer "what happened when": at 900 columns a day is
+  **96 s per pixel**, and the strongest tone finding of the reference day lasts **15.26 s** —
+  0.16 of a pixel, structurally invisible. A mark at a time position is scale-free, so a 15-second
+  event reads as well as a 40-minute one. The map is generated from *detections* (costs nothing
+  beyond the scan) and states its own gap coverage, so a blank stretch is never evidence of absence.
 * 8.3 `--stdout` human summary: top-N lines, no HTML needed (for scripts and for chat relays).
 * 8.4 Exit codes: 0 clean, 1 usage **or missing optional dependency**, 2 unreadable/decode error,
   3 detections exceed a
@@ -489,6 +522,10 @@ Whole-day throughput and memory (NFR-4/5): **see §2.3** for the census and tota
   sizing is `cores/2` rather than `cores`. `doctor` reports this environment's numbers before a
   run, and `--report`'s missing-extra case now fails in seconds instead of after 38 minutes (§11
   R14, FR-8.6).
+* **Day map + known.toml seeding (v0.4.0, 2026-10-24):** `daymap.svg` (marks, not pixels — the
+  measured case against a day spectrogram is in FR-8.2b) and `known --seed`, which proposes the
+  always-present sounds. On this corpus the seeder's answer is **none**, and it now says so with
+  evidence rather than printing an empty table. **116 tests green.**
 * **M5 (later)** — cross-night trending, optional ML classifier, capture-side integration.
   Before any of that: the **listening calibration** (R13) and a **multi-night corpus** (FR-7.2's
   day-of-week claim is not testable on one day), because the numbers in §2.3 are machine-truth

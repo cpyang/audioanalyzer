@@ -54,7 +54,8 @@ document.querySelectorAll('th').forEach(h=>h.onclick=()=>sortT(h));
 
 def build_report(files: list[str], dets: list[Detection], sources: list, coverage: dict,
                  cfg: Config, out_path: str | Path, top_figures: int = 12,
-                 media: dict | None = None, timeline: list | None = None) -> Path:
+                 media: dict | None = None, timeline: list | None = None,
+                 day_map: str | None = None) -> Path:
     """Write one self-contained HTML report and return its path (FR-8.2)."""
     out_path = Path(out_path)
     parts = [f"<!doctype html><html><head><meta charset='utf-8'>",
@@ -68,6 +69,21 @@ def build_report(files: list[str], dets: list[Detection], sources: list, coverag
 
     parts.append("<h2>Coverage</h2>")
     parts.append(_coverage_block(files, coverage, media or {}, cfg))
+
+    if day_map is None and dets:
+        # No size threshold: a 4-detection selection deserves the map as much as a 5000-detection
+        # day does, and build_day_map degrades to an explicit apology when nothing is time-stamped.
+        from .daymap import build_day_map
+        day_map = build_day_map(dets, coverage, cfg)
+    if day_map:
+        parts.append("<h2>Day map — what happened, when</h2>")
+        parts.append("<p class='meta'>One mark per minute and frequency band: the highest dB-over-"
+                     "the-local-floor seen there (robust z for impacts). Drawn from detections, not "
+                     "from a spectrogram — a day-long spectrogram puts 96 s into one pixel, so the "
+                     "15-second events this tool found would be invisible in it. Diagonal hatching "
+                     "is time the recorder never captured: <b>a blank stretch here is not evidence "
+                     "that nothing happened.</b></p>")
+        parts.append(day_map)
 
     parts.append(f"<h2>Detections ({len(dets)})</h2>")
     parts.append(_table(dets))

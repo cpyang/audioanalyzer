@@ -3,4 +3,4 @@
 See REQUIREMENTS.md for the specification this package implements.
 """
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"

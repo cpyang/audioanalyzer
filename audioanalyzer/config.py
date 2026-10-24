@@ -89,6 +89,13 @@ class Config:
     recurrence_tol_pct: float = 0.5        # ... whichever tolerance is wider
     recurrence_min_episodes: int = 2
 
+    # --- known.toml seeding (`known --seed`, FR-7.3) ---
+    seed_ridge_db: float = 4.0             # a median-spectrum peak this far above a smoothed
+    seed_ridge_octaves: float = 1.0        # ... of itself (window half-width, in octaves) is a
+                                           # permanent floor ridge, not an incident
+    seed_min_file_frac: float = 0.6        # "always here" = in at least this many of the files
+    seed_ridge_min_octaves: float = 0.15   # a ridge this narrow is a noise wiggle, not structure
+
     # --- source grouping A5 (FR-5.1) ---
     harmonic_tol_pct: float = 1.0
     cooccurrence_min_jaccard: float = 0.6

@@ -107,8 +107,24 @@ def build_parser() -> argparse.ArgumentParser:
     k = sub.add_parser("known", help="show or extend the known-source library (FR-7.3)")
     k.add_argument("--list", action="store_true")
     k.add_argument("--add", nargs="+", metavar=("NAME", "F0_HZ"), default=None,
-                   help="append a source: NAME F0_HZ [TOL_PCT] [HARMONICS]")
+                   help="append one confirmed source: NAME F0_HZ [TOL_PCT] [HARMONICS]")
     k.add_argument("-f", "--file", type=Path, default=Path("known.toml"))
+    k.add_argument("--seed", nargs="+", type=Path, default=None, metavar="RECORDING...",
+                   help="propose candidates from what is always present in these recordings")
+    k.add_argument("--candidates", type=Path, default=Path("known.candidates.toml"),
+                   help="where --seed writes proposals (never the live library)")
+    k.add_argument("--min-file-frac", type=float, default=None, dest="seed_min_file_frac",
+                   help="fraction of the fed recordings a sound must appear in (default "
+                        f"{Config().seed_min_file_frac:g})")
+    k.add_argument("--ridge-db", type=float, default=None, dest="seed_ridge_db",
+                   help="dB above a one-octave-smoothed trend for a floor ridge (default "
+                        f"{Config().seed_ridge_db:g})")
+    k.add_argument("--promote", type=Path, default=None, metavar="CANDIDATES.toml",
+                   help="copy chosen candidates into --file")
+    k.add_argument("--index", default="", metavar="1,3,5",
+                   help="which --promote entries (1-based, as printed by --seed)")
+    k.add_argument("--rename", nargs="*", default=None, metavar="IDX=NAME",
+                   help="name a promoted source after the physical thing, e.g. 3='CRH-3 fan'")
 
     pe = sub.add_parser("periodic", help="impulse-train analysis only (FR-9)")
     pe.add_argument("files", nargs="+", type=Path)
@@ -453,6 +469,73 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "known":
+        if args.seed:
+            from .seed import seed_candidates, write_candidates
+            cfg = Config()
+            if args.seed_min_file_frac is not None:
+                cfg.seed_min_file_frac = args.seed_min_file_frac
+            if args.seed_ridge_db is not None:
+                cfg.seed_ridge_db = args.seed_ridge_db
+            paths = _expand_paths(args.seed)
+            missing = [p for p in paths if not p.exists()]
+            if missing:
+                print(f"error: no such file(s): {[str(m) for m in missing][:4]}", file=sys.stderr)
+                return 2
+            if len(paths) < 2:
+                print("note: one recording fed — 'always present' can only be judged across time, "
+                      "so ridge/line agreement across files is not measured here. Feed a day "
+                      "(or several hours from different shifts) for a trustworthy candidate list.",
+                      file=sys.stderr)
+            print(f"seeding from {len(paths)} recording(s)...", file=sys.stderr)
+            st: dict = {}
+            cands = seed_candidates(paths, cfg, min_file_frac=cfg.seed_min_file_frac, stats=st,
+                                    progress=lambda i, n, p: print(
+                                        f"  [{i}/{n}] {Path(p).name}", file=sys.stderr, flush=True))
+            if not cands:
+                print(f"no always-present sound found in {st.get('files_total', 0)} recording(s): "
+                      f"nothing appeared in ≥{cfg.seed_min_file_frac:.0%} of them.\n"
+                      f"  examined {st.get('examined', {}).get('line', 0)} distinct line(s) and "
+                      f"{st.get('examined', {}).get('ridge', 0)} floor ridge(s) across the files")
+                bf = st.get("best_file_frac", {})
+                print(f"  best agreement seen: line {bf.get('line', 0):.0%} of files, "
+                      f"ridge {bf.get('ridge', 0):.0%} of files "
+                      f"(highest steady duty: {st.get('best_duty', {}).get('line', 0):.0%})")
+                print("  this is a real result, not a failure: a site whose noise is all "
+                      "event-shaped has nothing to put in known.toml, and the day census in "
+                      "REQUIREMENTS.md §2.3 says exactly that here (0 steady A1 tones in 24 h). "
+                      "Lower --min-file-frac to see the runners-up.")
+                return 0
+            p = write_candidates(args.candidates, cands)
+            print(f"\n  {'#':>3} {'Hz':>9}  {'kind':6}{'files':>7}{'duty%':>7}{'over dB':>8}"
+                  f"{'dBFS':>8}  harmonics")
+            for i, c in enumerate(cands, 1):
+                print(f"  {i:>3} {c.freq_hz:>9.2f}  {c.kind:6}{c.n_files:>4}/{c.files_total:<2}"
+                      f"{('-' if c.duty_pct is None else f'{c.duty_pct:.0f}'):>7}"
+                      f"{c.over_floor_db:>8.1f}{c.level_dbfs:>8.1f}  "
+                      f"{'/'.join(str(k) for k in c.harmonics[:6])}"
+                      f"{'  <- ' + ', '.join(Path(x).stem for x in c.seen_in[:2]) if i <= 3 else ''}")
+            print(f"\nwrote {p} ({len(cands)} candidate(s)). NOTHING IS CONFIRMED YET: listen to "
+                  f"them, then\npromote the real ones:\n"
+                  f"  audioanalyzer known --promote {p} --index 1,3 "
+                  f"--rename 1='CRH-3 fan' --file known.toml")
+            return 0
+        if args.promote:
+            from .seed import promote
+            idx = [int(x) for x in args.index.split(",") if x.strip()]
+            renames = {}
+            for spec in (args.rename or []):
+                k, _, v = spec.partition("=")
+                renames[int(k)] = v
+            if not idx:
+                print("error: --promote needs --index 1,3,5", file=sys.stderr)
+                return 1
+            try:
+                done = promote(args.promote, args.file, idx, renames)
+            except (IndexError, ValueError) as exc:
+                print(f"error: {exc}", file=sys.stderr)
+                return 1
+            print(f"promoted {len(done)} source(s) into {args.file}: {', '.join(done) or 'none (all already present)'}")
+            return 0
         srcs = load_known(args.file)
         if args.add:
             name, f0 = args.add[0], float(args.add[1])
@@ -541,6 +624,15 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         if not args.quiet:
             print(f"wrote {p} ({p.stat().st_size / 1e6:.2f} MB, self-contained)")
+        try:
+            from .daymap import build_day_map
+            svg = p.parent / "daymap.svg"
+            svg.write_text(build_day_map(all_dets, coverage, cfg, standalone=True),
+                           encoding="utf-8")
+            if not args.quiet:
+                print(f"wrote {svg} (standalone, zoomable — a PNG of a day puts 96 s in a pixel)")
+        except OSError as exc:                      # pragma: no cover
+            print(f"warning: could not write daymap.svg: {exc}", file=sys.stderr)
     if args.fail_on and _max_severity(all_dets) >= args.fail_on:
         return 3
     return 0

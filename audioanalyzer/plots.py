@@ -143,17 +143,27 @@ def overview_spectrogram(path: str | Path, cfg: Config, height_s: float = 3.0,
             mag[:, k] = np.abs(np.fft.rfft((x - x.mean()) * win)) / (win.sum() / 2.0)
     db = 20.0 * np.log10(np.maximum(mag, 1e-9))
     freqs = np.fft.rfftfreq(nperseg, 1.0 / sr)
+    # Colour by dB over an adaptive *frequency* floor, not by absolute dBFS.  On absolute scale the
+    # 47 dB LF->HF slope of the noise floor eats the whole colour budget: measured on the reference
+    # hour, 95.8 % of the image variance was that slope and the informative residual spanned only
+    # -3.1..+12.5 dB, so a real 26 dB-over-floor tone rendered as background.  Percentile windows
+    # made it worse: the bottom 2 % of cells are numerical dust from masked bins (vmin came out at
+    # -122 dBFS, 28 dB below the genuine floor).
+    from .spectral import mask_below, neighborhood_floor
+    first = max(1, int(np.ceil(cfg.min_freq / max(1e-6, freqs[1] - freqs[0]))))
+    floor = neighborhood_floor(mask_below(db, first), cfg.neighbor_k, axis=0)
+    show = np.nan_to_num(db - floor, nan=np.nan, posinf=0.0, neginf=-40.0)
     fig = Figure(figsize=(11.0, height_s))
     ax = fig.add_subplot(111)
     t = (np.arange(rows) * hop + nperseg / 2.0) / sr
-    keep = freqs > 0
+    keep = freqs >= cfg.min_freq
     if log_freq:
         ax.set_yscale("log")
-    ax.pcolormesh(t, freqs[keep], db[keep], shading="gouraud", cmap=_cmap(),
-                  vmin=np.percentile(db[keep], 2), vmax=np.percentile(db[keep], 99.9))
+    ax.pcolormesh(t, freqs[keep], show[keep], shading="gouraud", cmap=_cmap(),
+                  vmin=-4.0, vmax=24.0)
     ax.set_xlim(t[[0, -1]])
     ax.set_ylim((freqs[keep][1] if log_freq else freqs[keep][0], freqs[keep][-1]))
-    ax.set_ylabel("Hz" if not log_freq else "Hz (log)")
+    ax.set_ylabel("Hz (log)\ncolour: dB over\nlocal floor" if log_freq else "Hz\ncolour: dB over\nlocal floor")
     ax.set_xlabel("s from file start")
     ax.tick_params(colors="#cfd6dd", labelsize=7)
     ax.set_facecolor("#111418")

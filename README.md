@@ -89,7 +89,74 @@ completion counter goes to stderr, leaving stdout pipeable.
 # name what you already know (append-only, hand-editable)
 .venv/bin/audioanalyzer known --add "UPS double-mains ripple" 50 1.0 5
 .venv/bin/audioanalyzer scan . --known known.toml
+
+# or: ask what is always here, and let the tool propose the library (see below)
+.venv/bin/audioanalyzer known --seed . --candidates out/known.candidates.toml
 ```
+
+### Seeding `known.toml` from a recording
+
+Feed it recordings and it reports the sounds that are **essentially always present** — the site's
+acoustic fingerprint — as candidate entries, ranked by how permanent they look. On a file with three
+tones injected at known levels (the recall fixture), it recovers all three, with the duty cycle
+doing the ranking:
+
+```
+    #        Hz  kind    files  duty% over dB    dBFS  harmonics
+    1   4199.91  line     1/1     100    23.6   -70.9  1
+    2   7300.08  line     1/1     100    16.9   -80.8  1
+    3     65.08  line     1/1      17    15.0   -45.4  1
+```
+
+Two criteria, because one would miss the point: **lines** (narrowband tracks, with their measured
+duty cycle) and **floor ridges** (bumps standing above a locally *fitted* power-law trend). The
+ridge path needs care, and the reference corpus is the proof: its first output was **16 "always
+present sources", all in 6242–7203 Hz, all at −97 dBFS** — one anti-alias filter knee, exploded into
+one entry per single-bin noise wiggle, because a straight line fitted across a knee under-reads the
+level on the flat side. Three guards fixed it (a 3-bin median to drop isolated spikes, contiguity
+clustering, a crest requirement *in the residual* plus a fit window that must reach half an octave
+each way). What survives on this site is nothing:
+
+```
+no always-present sound found in 24 recording(s): nothing appeared in ≥60% of them.
+  examined 6 distinct line(s) and 0 floor ridge(s) across the files
+  best agreement seen: line 17% of files, ridge 0% of files (highest steady duty: 17%)
+```
+
+That is a real result, not a broken tool, and it agrees with the day census (§2.3): **zero steady
+A1 tones in 24 hours**, and the 6 tone tracks that recur at all appear in at most 4 of 24 files
+(17%) and never above 17% duty. A site whose noise is event-shaped has nothing honest to put in
+`known.toml` yet. When there *is* background hum (mains, a fan that never stops), this is the
+command that finds it.
+
+Then, after listening:
+
+```bash
+.venv/bin/audioanalyzer known --promote out/known.candidates.toml --index 1,2 \
+    --rename 1='CRH-3 fan' --file known.toml
+```
+
+Design constraints worth knowing, since they are the difference between a tool and a rumor mill:
+
+* Candidates go to `known.candidates.toml`, **never** into the live library. A name claims what
+  physical object makes a sound; only a walk confirms that.
+* A candidate's `f0_hz` is always an **observed** line. Fundamentals are never inferred — the
+  harmonic f0 fitter once produced "a 5.04 Hz machine" from three 25 Hz tracks, and a generated
+  library would have propagated that into every report afterwards.
+* Labelling is annotation only. Nothing anywhere filters on a known match, so a mislabelled entry
+  cannot hide a finding — it can only mis-name it.
+
+### Day map
+
+`--report` also writes `out/daymap.svg`: time of day across the top, log-frequency lanes down the
+side, each minute-and-band cell coloured by the loudest dB-over-floor seen there. Unrecorded
+intervals are hatched, and the top tone tracks are labelled with frequency, level and duty.
+
+This is deliberately not a day-long spectrogram. At 900 columns a 24-hour recording gives **96
+seconds per pixel**, and the strongest tone finding of the reference day lasts **15.26 seconds** —
+a sixth of a pixel, invisible no matter how the colour scale is set. A mark at a time position is
+scale-free, so a 15-second event reads as clearly as a 40-minute one. Spectrograms still do the job
+they are good at: ±30 s evidence crops beside each detection.
 
 `report.html` is self-contained (figures embedded as base64): sortable table, per-detection
 spectrogram + waveform crops, coverage ledger stating what was never recorded.
@@ -113,7 +180,7 @@ every output, because a report you cannot reproduce is a rumour.
 ## Tests
 
 ```bash
-.venv/bin/python -m pytest tests -q        # 97 tests, ~60 s, no audio files needed
+.venv/bin/python -m pytest tests -q        # 116 tests, ~90 s, no audio files needed
 ```
 
 Ground truth is injected and recovered: a tone added at 300–900 s comes back dated `0:05:00` for
