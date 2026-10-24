@@ -1,6 +1,6 @@
 # Audio Anomaly Analyser — Requirements
 
-Status: v0.3 — M0–M4 implemented and tested (62 tests green); whole-day verification in §2.3/§7.1
+Status: v0.3 — M0–M4 implemented and tested (97 tests green); whole-day verification in §2.3/§7.1
 Date: 2026-10-24
 Owner: (unassigned)
 Reference corpus: `/home/cpyang/Audio/20261023T070002.flac`
@@ -325,24 +325,36 @@ control; dashboards or DB backends; GUI.
   crop (±30 s, ±1 kHz; y-axis in Hz) and a 1 s waveform zoom, so noise floor vs tone is
   legible. Also one full-recording overview figure (log-freq, matching how a human reads it).
 * 8.3 `--stdout` human summary: top-N lines, no HTML needed (for scripts and for chat relays).
-* 8.4 Exit codes: 0 clean, 1 usage, 2 unreadable/decode error, 3 detections exceed a
+* 8.4 Exit codes: 0 clean, 1 usage **or missing optional dependency**, 2 unreadable/decode error,
+  3 detections exceed a
   `--fail-on` severity (makes it usable as a scheduled check). Severity for A1/A2 is
   `coherence × min(1, ttn/2·tone_noise_db) × min(1, 0.5+duty/100) × stability(level_std)` — a
   product of gate margins rather than a blend of weights, so any value can be explained factor
   by factor; A4's is `z/20`. Both `argparse` (which exits 2 on usage) and the decode path are
   covered by `tests/test_outputs.py` — that test is how an inert `--fail-on` was found.
+  **Both environment checks run before any analysis:** `--report` without matplotlib installed, and
+  an unreadable file in a directory, must cost seconds. A 24-file run that failed on the matplotlib
+  import after 38 minutes of CPU is the counter-example this clause exists to prevent.
 * 8.5 All outputs record the tool version, the config, and the exact thresholds used
   (a report is not reproducible without them).
+* 8.6 **Environment preflight.** `audioanalyzer doctor [dir]` reports every dependency (with which
+  are optional), libsndfile version, Python against the supported range, BLAS thread pinning,
+  available memory, and the worker count a directory of that size will get. Exit 1 only when the
+  tool cannot scan at all — a missing `--report` extra is a warning, because CSV/JSON still work.
+  Added after a field machine ran a whole day and then died on `import matplotlib`: an environment
+  question must cost seconds, not the run.
 
 ### FR-9 CLI (surface, names may change)
 ```
 audioanalyzer scan  FILE...         [-c cfg.toml] [--mode standard|hr] [--min-prominence DB]
                                     [--class tonal|transient|all] [--top N] [--report DIR]
                                     [--csv F] [--json F] [--tz TZ] [--min-freq/--max-freq]
+                                    [-J N]   (files in parallel; 0 = auto, 1 = serial)
 audioanalyzer profile  REF...       -o baseline.npz
 audioanalyzer compare  FILE --baseline baseline.npz
 audioanalyzer periodic FILE...      [--report DIR]
 audioanalyzer known  [--list] [--add NAME F0 TOL]
+audioanalyzer doctor [FILE...]      environment preflight: deps, threads, worker sizing
 audioanalyzer version / config --dump
 ```
 
@@ -353,11 +365,11 @@ audioanalyzer version / config --dump
 | ID | Requirement | Target / basis |
 |---|---|---|
 | NFR-1 | Language / runtime | Pure Python, ≥3.10. **3.12 chosen** for wheel breadth (host has 3.12 and 3.14; `uv` at `~/.local/bin/uv`) |
-| NFR-2 | Dependencies | `numpy`, `scipy`, `soundfile`, `matplotlib` (report only), `tomli`/stdlib TOML. **No `librosa`** (drags numba/llvmlite; no MIR needed). All four verified to have cp312 manylinux wheels (numpy 2.5.4, scipy 1.18.1, matplotlib 3.11.2; soundfile 0.14.0 ships `py2.py3-none-manylinux_2_28_x86_64` with bundled libsndfile) |
-| NFR-3 | Install | `uv venv --python 3.12` in `/home/cpyang/Audio/.venv`, `uv pip install -e .` — offline-reproducible via `requirements.lock`. No conda, no system-site-packages mutation |
-| NFR-4 | Throughput | ≤ 45 s wall and ≤ 1 CPU per 60-min/16 kHz mono file in standard mode; ≤ 4 min in `hr` mode (target: 1000× realtime). Measure with `time`; regression-test it. **Whole 24-chunk day ≤ 12 min standard mode** (the real workload unit). M0 measured: ingest pass = **1.35 s wall, 43 MB RSS** for 3573 s of audio (≈2650× realtime, single pass) |
-| NFR-5 | Memory | **< 400 MB peak RSS** per file (full STFT of the reference file would be 111 600 frames × 1025 bins ≈ 460 MB in float32 → must be blocked, per FR-1.2/3.5) |
-| NFR-6 | Determinism | Same input + config ⇒ byte-identical CSV. No RNG; sort by (t_start, freq) |
+| NFR-2 | Dependencies | `numpy`, `scipy`, `soundfile`, `matplotlib` (report only), `tomli`/stdlib TOML. **No `librosa`** (drags numba/llvmlite; no MIR needed). All four verified to have cp312 manylinux wheels (numpy 2.5.4, scipy 1.18.1, matplotlib 3.11.2; soundfile 0.14.0 ships `py2.py3-none-manylinux_2_28_x86_64` with bundled libsndfile). **An optional dep must be declared as an extra AND checked before any analysis starts** — not imported at the end of a long run (§11 R14) |
+| NFR-3 | Install | `uv venv --python 3.12` in `/home/cpyang/Audio/.venv`, `uv pip install -e '.[report]'` — offline-reproducible via `requirements.lock`. No conda, no system-site-packages mutation |
+| NFR-4 | Throughput | ≤ 45 s wall per 60-min/16 kHz mono file in standard mode; ≤ 4 min in `hr` mode. **Measured 14.9 s wall per file but at ~205 % CPU** (FFT/BLAS threads) — so the honest cost is ~31 s of CPU, not 1 core, and a worker budget must divide cores by 2 rather than assume 1. **Whole 24-chunk day: 8 m 04 s serial → 4 m 30 s in parallel** (`-J` auto = 6 workers here), 225 MB peak. Directory scans run **files in parallel by default**, sized `min(cores/2, MemAvailable/260 MB)`. M0 measured: ingest pass = 1.35 s wall, 43 MB RSS (≈2650× realtime) |
+| NFR-5 | Memory | **< 400 MB peak RSS** per file (full STFT of the reference file would be 111 600 frames × 1025 bins ≈ 460 MB in float32 → must be blocked, per FR-1.2/3.5). **Measured 210 MB per worker** ⇒ `jobs × 210 MB` must fit `MemAvailable`; the auto-sizer treats that as a bound, not advice |
+| NFR-6 | Determinism | Same input + config ⇒ byte-identical CSV. No RNG; sort by (t_start, freq). **Holds between `-J 1` and `-J N`**: results are reassembled in input order, never completion order (`tests/test_jobs.py`) |
 | NFR-7 | Privacy / network | Runs fully offline after install; never uploads audio |
 | NFR-8 | Tests | Unit tests on synthetic signals (known tone/click/comb injected ⇒ detector must return the ground truth) + a golden test on the real file. `pytest`, coverage on detector math |
 | NFR-9 | Logging / UX | `--progress` block-level percentage; `--quiet`; warnings to stderr so stdout stays pipeable |
@@ -421,8 +433,8 @@ Whole-day throughput and memory (NFR-4/5): **see §2.3** for the census and tota
     plots.py        spectrogram/waveform figures, Agg, no GUI (FR-8.2)
     report_html.py  self-contained HTML report (FR-8.2/8.5)
     synth.py        corpus-calibrated test signals: rumble, add_tone, add_click (AC-2/4/5)
-  tests/            test_ingest  test_spectral  test_detectors  test_transients
-                    test_profile  test_known  test_timebase          — 62 tests
+  tests/            test_ingest  test_spectral  test_detectors  test_transients  test_timebase
+                    test_profile  test_known  test_outputs  test_corpus  test_jobs
   out/              per-run artifacts: detections.csv, scan.json, report.html (git-ignored)
 ```
 
@@ -468,6 +480,15 @@ Whole-day throughput and memory (NFR-4/5): **see §2.3** for the census and tota
 * **Definitive whole-day pass (v0.2.0, 2026-10-24):** `scan .` over 24 files → 5023 detections in
   **8 m 04 s**, **309 MB** peak RSS (NFR-4/5 met; the earlier 1336 s run had been ~2 passes/file
   plus an O(n²) merge), CSV + JSON + a 1.78 MB self-contained HTML report. Census in §2.3.
+* **Parallel directory scans (v0.3.0, 2026-10-24):** the same 24 files with CSV+JSON+HTML in
+  **4 m 30 s** at 6 workers, 563 % CPU, 225 MB peak — **1.8× the serial rate**, byte-identical CSV.
+  What the sizing experiments established, because the intuition was wrong twice: pinning each
+  worker's BLAS threads to 1 beat adding workers (6 files: 120 s serial → 83.7 s at 6 default-
+  threaded workers → **68.6 s** at 6 pinned workers), and going wider is flat (whole day: 269.6 s
+  at 6 workers vs 267.9 s at 12, for 1.7× the CPU) — throughput is memory-bandwidth bound, so auto
+  sizing is `cores/2` rather than `cores`. `doctor` reports this environment's numbers before a
+  run, and `--report`'s missing-extra case now fails in seconds instead of after 38 minutes (§11
+  R14, FR-8.6).
 * **M5 (later)** — cross-night trending, optional ML classifier, capture-side integration.
   Before any of that: the **listening calibration** (R13) and a **multi-night corpus** (FR-7.2's
   day-of-week claim is not testable on one day), because the numbers in §2.3 are machine-truth
@@ -521,6 +542,7 @@ Still open (do not block M1 on these):
 | R11 | **Streaming timebase drift** — any block reader that treats chunks as independent while computing frame times as `i·hop` loses the window overlap per block. Silent (0.32%/hour here), and every downstream stat inherits it | Invariant pinned by `tests/test_timebase.py` (frame count closed form + impulse dating in a 3 s-block file). `iter_blocks` re-reads `nperseg − hop` overlap per chunk. Class of bug to suspect first in any new reader |
 | R12 | **Coherent artefacts that no gate can reject:** the resampling spur at Nyquist scores phase coherence 0.97 — indistinguishable from a motor whine by measurement alone | Explicit `nyquist_guard = 0.98` band exclusion (R1/R3), reported as a guard rather than hidden; `known.toml` naming for what the site says these lines are; confirmation sweep at 48 kHz if a near-band-edge line ever matters |
 | R13 | A4's real-audio false-positive rate is unmeasured — synthetic rumble says 0/hour, one real hour said 73–205/hour | Report events per hour and per band so the noise is visible; `--class tonal` to suppress; needs a labelled ~2 h listening pass to set the operating point |
+| R14 | **Environment and parallelism fail late, not early.** A missing optional dep (matplotlib) surfaced only at the report step of a 38-minute run; and a naive parallel sweep either oversubscribes FFT threads (worker measured ~205 % CPU, so `cores` workers thrash) or multiplies a 210 MB working set past free RAM | `--report` and every input file are checked before analysis starts (exit 1/2 in seconds); extras declared in `pyproject.toml`; worker count auto-sized `min(cores/2, MemAvailable/260 MB)` with `-J` to override; corpus views assembled in the parent in input order so parallel and serial output are byte-identical |
 
 ---
 

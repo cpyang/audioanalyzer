@@ -8,10 +8,11 @@ flag relaxes these to a triage-everything profile.
 from __future__ import annotations
 
 import dataclasses
-import tomllib
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Any
+
+from ._toml import tomllib
 
 # Host-local convention resolved per REQUIREMENTS.md §10 decision 3
 # (filename timestamp = capture start in host-local time).

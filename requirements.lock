@@ -1,4 +1,6 @@
-# local package: install with `uv pip install -e .` (this file pins only third-party deps)
+# Third-party pins for reproducible field installs (uv pip freeze on the .venv, 2026-10-24).
+# audioanalyzer itself is installed from this tree:  uv pip install -e '.[report]'
+# tomli is intentionally absent: needed only on python<3.11, where stdlib tomllib does not exist.
 cffi==2.1.1
 contourpy==1.4.0
 cycler==0.12.1

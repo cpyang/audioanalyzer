@@ -8,7 +8,17 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
+
+# Must happen before numpy/OpenBLAS loads (i.e. before the imports below), because the library
+# reads its thread count once, at init, and a pool of workers each running N BLAS threads only
+# thrashes shared cache: 6 files measured 120 s serial, 83.7 s at 6 default-threaded workers, and
+# 68.6 s with one thread each — faster *and* using 32 % less total CPU.  setdefault, so an explicit
+# `OMP_NUM_THREADS=4 audioanalyzer …` still wins.  Cost to a single-file scan: 14.6 -> 15.4 s.
+for _var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
+    os.environ.setdefault(_var, "1")
+
 from pathlib import Path
 
 import numpy as np
@@ -64,11 +74,18 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--max-freq", type=float, default=None, dest="max_freq")
     s.add_argument("--quiet", action="store_true")
     s.add_argument("--progress", action="store_true")
+    s.add_argument("-J", "--jobs", type=int, default=0, metavar="N",
+                   help="files to analyse in parallel; 0 = auto (min of cores/2 and free RAM/260MB)")
     s.add_argument("--fail-on", type=float, default=None, dest="fail_on",
                    help="exit 3 if any detection's confidence reaches this value (FR-8.4)")
 
     v = sub.add_parser("version", help="print version")
     v.add_argument("--json", action="store_true")
+
+    d = sub.add_parser("doctor", help="check this environment BEFORE a long run (deps, threads, sizing)")
+    d.add_argument("files", nargs="*", type=Path, default=[],
+                   help="optional: the files/dir you are about to scan, to size the pool")
+    d.add_argument("--json", type=Path, default=None)
 
     pr = sub.add_parser("profile", help="build a reference noise-floor profile (FR-6.1)")
     pr.add_argument("files", nargs="+", type=Path)
@@ -108,6 +125,152 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+_PER_WORKER_CORES = 2        # measured knee: throughput saturates near cores/2 (see _resolve_jobs)
+_PER_WORKER_MEM_MB = 260.0   # measured: 210-225 MB peak per 16 kHz hour, plus slack
+# 24 hour-long files in 269.6 s at auto sizing on a 12-core box.  Machine-specific by construction;
+# doctor quotes it so a "how long will this take" question has a number attached, not a shrug.
+_SECONDS_PER_FILE_PARALLEL = 11.2
+
+
+def _mem_available_mb() -> float:
+    """MemAvailable where the kernel exposes it; otherwise assume nothing is free (=> 1 job)."""
+    try:
+        for line in open("/proc/meminfo"):
+            if line.startswith("MemAvailable:"):
+                return float(line.split()[1]) / 1024.0
+    except OSError:
+        pass
+    return 0.0
+
+
+def _resolve_jobs(requested: int, n_files: int) -> int:
+    """How many files to analyse at once.  ``0`` = auto.
+
+    Auto is ``cores/2``, and that number is measured rather than reasoned.  On a 12-core box, six
+    hour-long files took 120 s serial, 83.7 s with six default-threaded workers, and 68.6 s with
+    six workers whose BLAS threads are pinned (so pinning, not more workers, is what paid).  Going
+    wider buys nothing: the whole day ran 269.6 s at 6 workers (576 % CPU) and 267.9 s at 12
+    (962 % CPU) — same wall clock, 1.7× the CPU.  Throughput saturates on memory bandwidth at
+    roughly half the cores, so oversubscribing spends electricity and cache to move nothing.
+
+    Free RAM is the other bound: one worker measured 210-225 MB for an hour of 16 kHz, and the
+    pool must not size itself into an OOM on a shared machine.
+    """
+    if n_files < 2:
+        return 1
+    if requested > 0:
+        return min(requested, n_files)
+    import os
+    cores = max(1, (os.cpu_count() or 1) // _PER_WORKER_CORES)
+    mem = max(1, int(_mem_available_mb() // _PER_WORKER_MEM_MB))
+    return max(1, min(cores, mem, n_files, 16))
+
+
+def _require_optional(module: str, extra: str, flag: str) -> int:
+    """Check an optional dependency BEFORE the expensive work, not after it.
+
+    On the reported machine a 24-file directory ran for 38 minutes, wrote CSV and JSON, and only
+    then died on ``import matplotlib`` inside ``--report`` — the traceback was the first thing the
+    user saw that the environment was incomplete.  Exit 1 (FR-8.4: usage/environment), with the
+    command that fixes it.
+    """
+    import importlib.util
+    if importlib.util.find_spec(module) is not None:
+        return 0
+    print(f"error: {flag} needs the '{module}' package, which is not installed here.\n"
+          f"  fix the environment:  python -m pip install '.[{extra}]'\n"
+          f"  or run without {flag} to get CSV/JSON only (they need no optional packages).",
+          file=sys.stderr)
+    return 1
+
+
+def _preflight_readable(path: Path) -> int:
+    """Open the header only — cheap, and it turns a 38-minute failure into an instant one."""
+    try:
+        with sf.SoundFile(str(path)):
+            pass
+    except (OSError, sf.SoundFileError) as exc:
+        print(f"error: cannot decode {path}: {exc}", file=sys.stderr)
+        return 2
+    return 0
+
+
+def _scan_worker(payload):
+    """One file, in a child process.  Module-level so it pickles; renders its own text block."""
+    path_str, cfg, progress = payload
+    try:
+        res = scan_file(Path(path_str), cfg, progress=progress)
+    except (OSError, sf.SoundFileError) as exc:
+        return {"path": path_str, "error": f"error: cannot decode {path_str}: {exc}"}
+    except Exception as exc:                                # a worker crash must not hang the run
+        return {"path": path_str,
+                "error": f"error: worker failed on {path_str}: {type(exc).__name__}: {exc}"}
+    flags = res.media.quality_flags(cfg)
+    return {"path": path_str, "error": None, "media": res.media, "flags": flags,
+            "detections": res.detections, "analysis": res.summary(),
+            "json_dets": detections_json(res.detections),
+            "text": _render(res, flags, cfg)}
+
+
+def _scan_all(paths, cfg, *, jobs: int, quiet: bool, progress: bool):
+    """Scan a selection, serially or across processes, and assemble it in *input* order.
+
+    Ordering matters twice over: the CSV must be byte-identical to a serial run (NFR-6) and the
+    per-file blocks must land in the same stdout sequence whichever path produced them.  With
+    workers, results are buffered and printed in input order as soon as the next one is ready to
+    show, while a one-line completion counter goes to stderr so a long run is not silent.
+    """
+    n = len(paths)
+    results: list[dict | None] = [None] * n
+    if jobs > 1 and n > 1:
+        import concurrent.futures as cf
+        with cf.ProcessPoolExecutor(max_workers=jobs) as ex:
+            futs = {ex.submit(_scan_worker, (str(p), cfg, False)): i for i, p in enumerate(paths)}
+            print(f"scanning {n} file(s) with {jobs} worker(s)", file=sys.stderr, flush=True)
+            done = 0
+            for fut in cf.as_completed(futs):
+                i = futs[fut]
+                try:
+                    results[i] = fut.result()
+                except Exception as exc:                    # pragma: no cover - child killed
+                    results[i] = {"path": str(paths[i]),
+                                  "error": f"error: worker lost {paths[i]}: {exc}"}
+                done += 1
+                if not quiet:
+                    tail = " FAILED" if results[i]["error"] else ""
+                    print(f"  [{done}/{n}] {Path(results[i]['path']).name}{tail}",
+                          file=sys.stderr, flush=True)
+        return _assemble(results, quiet=quiet, stream=False)
+    stop = n
+    for i, path in enumerate(paths):
+        results[i] = _scan_worker((str(path), cfg, progress))
+        if results[i]["error"]:
+            stop = i + 1                            # serial keeps the old fail-fast behaviour
+            break
+    return _assemble(results[:stop], quiet=quiet, stream=True)
+
+
+def _assemble(results, *, quiet: bool, stream: bool):
+    summaries, all_dets, infos, errors = [], [], [], []
+    for r in results:
+        if r is None:
+            continue
+        if r["error"]:
+            errors.append(r["error"])
+            continue
+        all_dets += r["detections"]
+        infos.append(r["media"])
+        summaries.append({"media": r["media"].to_dict(), "quality_flags": r["flags"],
+                          "analysis": r["analysis"], "detections": r["json_dets"]})
+        if not quiet and stream:
+            print(r["text"])
+    if not stream and not quiet:
+        for r in results:
+            if r and not r["error"]:
+                print(r["text"])
+    return summaries, all_dets, infos, errors
+
+
 def config_from_args(args: argparse.Namespace) -> Config:
     cfg = Config.from_toml(args.config) if getattr(args, "config", None) else Config()
     for key in ("min_prominence_db", "min_tone_s", "top", "min_freq", "max_freq"):
@@ -141,12 +304,99 @@ def _expand_paths(patterns):
     return paths
 
 
+def _doctor(files: list[Path], out_json: Path | None = None) -> int:
+    """Report what this environment can and cannot do, before a run costs an hour to find out.
+
+    Written because a clone on a fresh machine ran a whole day, then died on a missing optional
+    package.  A scan is expensive; this check is not, and it answers the three questions that
+    actually bite: is every import present, are BLAS threads pinned, and how many workers will
+    the machine afford.
+    """
+    import importlib.util
+    import multiprocessing
+
+    n_files = 0
+    for pattern in files:
+        if pattern.is_dir():
+            n_files += len(sorted(pattern.glob("*.flac")) + sorted(pattern.glob("*.wav")))
+        elif pattern.exists():
+            n_files += 1
+
+    mods: dict[str, str] = {}
+    problems: list[str] = []
+    for name, role in (("numpy", "required"), ("scipy", "required"), ("soundfile", "required"),
+                       ("matplotlib", "required by --report only"), ("pytest", "tests only")):
+        spec = importlib.util.find_spec(name)
+        if spec is None:
+            mods[name] = "MISSING"
+            if role.startswith("required") and "only" not in role:
+                problems.append(f"{name} is not installed — install with:  pip install -e '.[report]'")
+            elif name == "matplotlib":
+                problems.append("matplotlib is not installed — `--report` will exit 1 (scan/CSV/JSON "
+                                "still work); install with:  pip install -e '.[report]'")
+        else:
+            try:
+                mods[name] = __import__(name).__version__
+            except Exception:                            # pragma: no cover
+                mods[name] = "importable, version unknown"
+    try:
+        import soundfile as _sf
+        mods["libsndfile"] = _sf.__libsndfile_version__
+    except Exception:                                    # pragma: no cover
+        problems.append("could not read the bundled libsndfile version")
+
+    py = sys.version_info
+    if py < (3, 10):
+        problems.append(f"python {py.major}.{py.minor} is below the supported floor (3.10)")
+    elif py >= (3, 13):
+        problems.append(f"python {py.major}.{py.minor} has no verified wheels for this stack "
+                        "(§11 R9): use 3.12")
+    if sys.version_info < (3, 11) and importlib.util.find_spec("tomli") is None:
+        problems.append("python <3.11 needs the `tomli` backport for config/known TOML")
+
+    threads = {k: os.environ.get(k, "unset") for k in
+               ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS")}
+    mem = _mem_available_mb()
+    jobs = _resolve_jobs(0, max(n_files, 2))
+    doc = {
+        "tool": __version__, "python": sys.version.split()[0], "modules": mods,
+        "blas_threads": threads,
+        "cpu_count": multiprocessing.cpu_count(),
+        "mem_available_mb": round(mem),
+        "per_worker_mb_estimate": _PER_WORKER_MEM_MB,
+        "auto_jobs_for_this_machine": jobs,
+        "files_found": n_files,
+        "problems": problems,
+    }
+    if out_json:
+        Path(out_json).write_text(json.dumps(doc, indent=2) + "\n")
+    print(f"audioanalyzer {__version__} on python {doc['python']}")
+    for k, v in mods.items():
+        print(f"  {'OK ' if v != 'MISSING' else '!! '}{k:12s} {v}")
+    print(f"  cpu(s)      {doc['cpu_count']}   BLAS threads pinned to {threads['OMP_NUM_THREADS']}")
+    print(f"  memory      {doc['mem_available_mb']} MB available "
+          f"(~{_PER_WORKER_MEM_MB:.0f} MB per worker)")
+    if files:
+        est = n_files * _SECONDS_PER_FILE_PARALLEL
+        print(f"  your scan   {n_files} file(s) → {jobs} worker(s), "
+              f"≈{int(est // 60)} m {int(est % 60):02d} s at this box's measured throughput "
+              f"({_SECONDS_PER_FILE_PARALLEL} s/file at auto sizing)")
+    for p in problems:
+        print(f"  PROBLEM     {p}")
+    # Exit 1 only when the tool cannot scan at all; a missing --report extra is a warning.
+    return 1 if any(m == "MISSING" for k, m in mods.items()
+                    if k in ("numpy", "scipy", "soundfile")) else 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
 
     if args.command == "version":
         print(json.dumps({"version": __version__}) if args.json else f"audioanalyzer {__version__}")
         return 0
+
+    if args.command == "doctor":
+        return _doctor(list(args.files), args.json)
 
     if args.command == "profile":
         cfg = Config()
@@ -228,24 +478,27 @@ def main(argv: list[str] | None = None) -> int:
         else:
             paths.append(pattern)
 
-    summaries, all_dets, infos = [], [], []
+    if args.report:                                   # FR-8.4: fail before the expensive work
+        rc = _require_optional("matplotlib", "report", "--report")
+        if rc:
+            return rc
+    # Missing or undecodable input is cheap to discover and expensive to discover late: a 24-file
+    # directory used to burn the whole run before erroring on the file that could not be opened.
     for path in paths:
         if not path.exists():
             print(f"error: no such file: {path}", file=sys.stderr)
             return 2
-        try:
-            res = scan_file(path, cfg, progress=args.progress)
-        except (OSError, sf.SoundFileError) as exc:  # unreadable/undecodable -> exit 2
-            print(f"error: cannot decode {path}: {exc}", file=sys.stderr)
-            return 2
-        flags = res.media.quality_flags(cfg)
-        all_dets += res.detections
-        infos.append(res.media)
-        summaries.append({"media": res.media.to_dict(), "quality_flags": flags,
-                          "analysis": res.summary(),
-                          "detections": detections_json(res.detections)})
-        if not args.quiet:
-            print(_render(res, flags, cfg))
+        rc = _preflight_readable(path)
+        if rc:
+            return rc
+
+    jobs = _resolve_jobs(getattr(args, "jobs", 0), len(paths))
+    summaries, all_dets, infos, errors = _scan_all(paths, cfg, jobs=jobs,
+                                                   quiet=args.quiet, progress=args.progress)
+    if errors:
+        for message in errors:
+            print(message, file=sys.stderr)
+        return 2
 
     # A5 grouping runs over the whole selection, not per file: a machine that whines through
     # six hourly chunks is one source, and that is the row an engineer walks toward (FR-5.1).
@@ -270,12 +523,22 @@ def main(argv: list[str] | None = None) -> int:
         if not args.quiet:
             print(f"wrote {args.json}")
     if args.report:
-        from .report_html import build_report
+        try:
+            from .report_html import build_report
+        except ImportError as exc:                # pragma: no cover - broken/partial install
+            print(f"error: --report could not load ({exc}); CSV/JSON above are complete",
+                  file=sys.stderr)
+            return 1
         out = Path(args.report)
         out = out / "report.html" if out.is_dir() or str(args.report).endswith("/") else out
         media = {s["media"]["path"]: s["media"] for s in summaries}
-        p = build_report([str(x) for x in paths], all_dets, sources, coverage, cfg, out,
-                         media=media, timeline=timeline)
+        try:
+            p = build_report([str(x) for x in paths], all_dets, sources, coverage, cfg, out,
+                             media=media, timeline=timeline)
+        except Exception as exc:
+            print(f"error: report generation failed after the analysis ({type(exc).__name__}: "
+                  f"{exc}); the CSV and JSON are complete and valid", file=sys.stderr)
+            return 1
         if not args.quiet:
             print(f"wrote {p} ({p.stat().st_size / 1e6:.2f} MB, self-contained)")
     if args.fail_on and _max_severity(all_dets) >= args.fail_on:

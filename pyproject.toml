@@ -4,18 +4,20 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "audioanalyzer"
-version = "0.2.0"
+version = "0.3.0"
 description = "Scan long-duration FLAC recordings for abnormal frequencies (tones, comb/periodic events, transients) with time and frequency annotation."
 requires-python = ">=3.10,<3.13"
 dependencies = [
     "numpy>=1.26",
     "scipy>=1.11",
     "soundfile>=0.12.1",
+    # tomllib is stdlib from 3.11; the floor below is 3.10, where this backport is required.
+    "tomli>=2; python_version < '3.11'",
 ]
 
 [project.optional-dependencies]
 report = ["matplotlib>=3.8"]
-dev = ["pytest>=7.4"]
+dev = ["pytest>=7.4", "matplotlib>=3.8"]
 
 [project.scripts]
 audioanalyzer = "audioanalyzer.cli:main"

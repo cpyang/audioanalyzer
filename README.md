@@ -11,13 +11,37 @@ this tool does not use a loudness threshold).
 
 ```bash
 cd ~/Audio
-uv venv --python 3.12 .venv          # python 3.12: widest wheel coverage (doc §11 R9)
-.venv/bin/python -m pip install -e . # or: uv pip install -e .
+uv venv --python 3.12 .venv           # python 3.12: widest wheel coverage (doc §11 R9)
+.venv/bin/python -m pip install -e '.[report]'    # or: uv pip install -e '.[report]'
 .venv/bin/audioanalyzer version
+```
+
+`[report]` pulls matplotlib, needed only by `--report`; scan/CSV/JSON need nothing optional.
+**Install it if you plan to write HTML** — the tool now checks up front and exits 1 with the fix
+command rather than dying after a 38-minute directory run.
+
+Verify the environment in one line before a long job:
+
+```bash
+.venv/bin/python -c "import numpy, scipy, soundfile, matplotlib; print('deps ok')"
 ```
 
 Audio is never committed: `*.flac` and friends are in `.gitignore`, and the test suite generates
 synthetic fixtures calibrated to this corpus's measured floor (`audioanalyzer/synth.py`).
+
+### Checking a machine before a long run
+
+```bash
+.venv/bin/audioanalyzer doctor /path/to/recordings
+```
+
+Lists every dependency (and which are optional), the bundled libsndfile version, the Python
+version against the supported range, BLAS thread pinning, available memory, and how many workers a
+directory of that size will actually get on this box. Exit 1 means it cannot scan at all; a missing
+`--report` extra is reported as a problem but still exits 0, because CSV/JSON work without it.
+
+On Python 3.10 the `tomli` backport is required and is declared as a conditional dependency;
+3.11+ uses stdlib `tomllib`.
 
 ## Use
 
@@ -28,6 +52,30 @@ synthetic fixtures calibrated to this corpus's measured floor (`audioanalyzer/sy
 # a whole day (directory or glob): merged timeline, sources, coverage ledger, recurrence
 .venv/bin/audioanalyzer scan . --csv out/detections.csv --json out/scan.json --report out/report.html
 
+# parallel across files — the default; `-J 1` forces serial, `-J N` pins the worker count
+.venv/bin/audioanalyzer scan . -J 8 --csv out/detections.csv
+```
+
+A directory is analysed **in parallel by file**, because each hourly chunk is independent work and
+the corpus views (A5 grouping, timeline, recurrence) only need the results afterwards. Measured on
+this corpus, 12-core box: **8 m 14 s serial → 4 m 30 s** at the default sizing (1.83×).
+
+Two measurements set the policy, because neither was obvious in advance:
+
+* **Threads matter more than workers.** One file uses ~205 % CPU from BLAS, so 6 default-threaded
+  workers on 6 files took 83.7 s while 6 workers with BLAS pinned to 1 thread took **68.6 s** —
+  faster *and* using less total CPU. `cli.py` therefore pins `OMP/OPENBLAS/MKL/NUMEXPR_NUM_THREADS`
+  to 1 before numpy loads (an explicit `OMP_NUM_THREADS=4` in the environment still wins).
+* **More workers is not more speed.** The whole day ran 269.6 s at 6 workers (576 % CPU) and
+  267.9 s at 12 (**962 % CPU**) — identical wall clock for 1.7× the energy. Throughput saturates on
+  memory bandwidth near half the cores, so auto-sizing is `min(cores/2, MemAvailable/260 MB)` and
+  `-J N` overrides it when you know better.
+
+Output is assembled in **input order**, never completion order, so `--csv` is byte-identical
+between `-J 1` and `-J 12` (verified on the real 24-file day, `cmp` clean) and only a `[k/n] file`
+completion counter goes to stderr, leaving stdout pipeable.
+
+```bash
 # more sensitive sweep (triage; expect more false positives)
 .venv/bin/audioanalyzer scan . --recall --class tonal
 
@@ -65,7 +113,7 @@ every output, because a report you cannot reproduce is a rumour.
 ## Tests
 
 ```bash
-.venv/bin/python -m pytest tests -q        # 62 tests, ~45 s, no audio files needed
+.venv/bin/python -m pytest tests -q        # 97 tests, ~60 s, no audio files needed
 ```
 
 Ground truth is injected and recovered: a tone added at 300–900 s comes back dated `0:05:00` for
