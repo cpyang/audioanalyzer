@@ -55,6 +55,14 @@ def _add_map_args(p: argparse.ArgumentParser) -> None:
                         "(default 18; 24-30 is comfortable, at the cost of a taller map)")
     p.add_argument("--map-bucket", type=float, default=60.0, metavar="S", dest="map_bucket",
                    help="seconds per day-map column (default 60)")
+    p.add_argument("--map-lo", type=float, default=None, dest="map_lo", metavar="HZ",
+                   help="day map: bottom of the frequency window (default: the analysis floor). "
+                        "Detections below it are dropped, not folded into the lowest lane")
+    p.add_argument("--map-hi", type=float, default=None, dest="map_hi", metavar="HZ",
+                   help="day map: top of the frequency window (default 7600 Hz)")
+    p.add_argument("--map-cut", type=float, default=None, dest="map_cut", metavar="DB",
+                   help="day map: hide cells quieter than this many dB over the local floor "
+                        "(robust z for impacts) — a view filter, stated on the map itself")
     g = p.add_mutually_exclusive_group()
     g.add_argument("--by-day", action="store_true", default=None, dest="by_day",
                    help="one panel per calendar day, x aligned on hour of day")
@@ -455,8 +463,15 @@ def main(argv: list[str] | None = None) -> int:
         n = sum(1 for d in dets if d.t_start_wall)
         days = sorted({d.t_start_wall[:10] for d in dets if d.t_start_wall})
         by_day_eff = args.by_day if args.by_day is not None else len(days) > 1
-        svg = build_day_map(dets, cov, cfg, standalone=True, lanes=args.lanes,
-                            lane_h=args.lane_h, bucket_s=args.map_bucket, by_day=args.by_day)
+        stats: dict = {}
+        try:
+            svg = build_day_map(dets, cov, cfg, standalone=True, lanes=args.lanes,
+                                lane_h=args.lane_h, bucket_s=args.map_bucket,
+                                by_day=args.by_day, freq_lo=args.map_lo, freq_hi=args.map_hi,
+                                min_severity=args.map_cut, stats=stats)
+        except ValueError as exc:                       # e.g. --map-lo >= --map-hi
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
         out = args.out
         out = out / "daymap.svg" if out.is_dir() or str(out).endswith("/") else out
         out.parent.mkdir(parents=True, exist_ok=True)
@@ -465,6 +480,14 @@ def main(argv: list[str] | None = None) -> int:
               f"[{', '.join(days[:3])}{' …' if len(days) > 3 else ''}]")
         print(f"  layout: {'one panel per day, x = hour of day' if by_day_eff else 'single panel on wall clock'}"
               f", {args.lanes} lane(s) × {args.lane_h:g} px, {args.map_bucket:g} s columns")
+        if stats.get("dropped_freq") or stats.get("dropped_sev"):
+            print(f"  filter:  band {stats['freq_lo']:.0f}-{stats['freq_hi']:.0f} Hz, "
+                  f"{stats['drawn']:,} of {stats['detections']:,} detections drawn "
+                  f"({stats['cells']:,} cells) — dropped "
+                  f"{stats['dropped_freq']:,} outside the band, {stats['dropped_sev']:,} under the cut")
+            if not stats["cells"]:
+                print("           EMPTY MAP: every detection was filtered out. This is a view "
+                      "setting, not a quiet site — widen the band or lower --map-cut.")
         if not cov:
             print("  note: a CSV carries no coverage ledger, so unrecorded intervals are not "
                   "hatched here — point this at the scan.json for the faithful map")
@@ -620,6 +643,15 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     cfg = config_from_args(args)
+    # Day-map view filters are validated before any analysis: --map-lo 4000 --map-hi 1000 should
+    # cost the seconds it takes to type, not the 4½ minutes of a whole-day scan.
+    if getattr(args, "map_lo", None) is not None or getattr(args, "map_hi", None) is not None:
+        _lo = args.map_lo if args.map_lo is not None else cfg.min_freq
+        _hi = args.map_hi if args.map_hi is not None else 7600.0
+        if not (0.0 < _lo < _hi):
+            print(f"error: day map frequency window must satisfy 0 < --map-lo < --map-hi, "
+                  f"got {_lo:g}-{_hi:g} Hz", file=sys.stderr)
+            return 1
     paths: list[Path] = []
     for pattern in args.files:
         if pattern.is_dir():
@@ -687,7 +719,9 @@ def main(argv: list[str] | None = None) -> int:
             from .daymap import build_day_map
             map_svg = build_day_map(all_dets, coverage, cfg,
                                     lanes=args.lanes, lane_h=args.lane_h,
-                                    bucket_s=args.map_bucket, by_day=args.by_day)
+                                    bucket_s=args.map_bucket, by_day=args.by_day,
+                                    freq_lo=args.map_lo, freq_hi=args.map_hi,
+                                    min_severity=args.map_cut)
             p = build_report([str(x) for x in paths], all_dets, sources, coverage, cfg, out,
                              media=media, timeline=timeline, day_map=map_svg)
         except Exception as exc:

@@ -541,6 +541,16 @@ Whole-day throughput and memory (NFR-4/5): **see §2.3** for the census and tota
   actual iteration. Fixing the multi-day test exposed an R10 hole: a blackout **later than the last
   detection** was drawn past the canvas edge and effectively deleted — the old test passed only
   because it asserted the string was present. The span now includes gaps. **130 tests green.**
+* **Day-map view filters (v0.6.0, 2026-10-24):** `--map-lo/--map-hi` (frequency window) and
+  `--map-cut` (hide cells below N dB over the local floor, robust z for impacts). Two traps, both
+  fixed before shipping: the existing `np.clip` on the lane index would have folded every
+  out-of-band detection into the nearest visible lane, painting a hot band that does not exist, so
+  out-of-window detections are dropped and the lane check is computed, not clamped; and a filter
+  that hides things must say so, so the caption carries the band and the drop counts, an
+  all-filtered-out map prints `EMPTY AFTER FILTERS` in the middle of the canvas instead of looking
+  like a quiet site, and `--map-lo >= --map-hi` fails before analysis rather than after 4½ minutes.
+  Measured on the reference day: `--map-cut 20` keeps 331 of 5,023 detections — 330 impacts and the
+  single 29.4 dB tone — because the impact population sits at median z 10.1. **141 tests green.**
 * **M5 (later)** — cross-night trending, optional ML classifier, capture-side integration.
   Before any of that: the **listening calibration** (R13) and a **multi-night corpus** (FR-7.2's
   day-of-week claim is not testable on one day), because the numbers in §2.3 are machine-truth

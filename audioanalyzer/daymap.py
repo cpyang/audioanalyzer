@@ -160,13 +160,31 @@ def _from_csv(r: dict) -> Detection:
 
 # --------------------------------------------------------------------------- painting
 
-def _grid_for(dets, edges, lanes, origin, ncol, bucket_s, by_day, day_start=None):
-    """Max severity per (lane, time bucket). ``by_day`` measures x from that day's midnight."""
+def _grid_for(dets, edges, lanes, origin, ncol, bucket_s, by_day, day_start=None,
+              min_sev=None):
+    """Max severity per (lane, time bucket). ``by_day`` measures x from that day's midnight.
+
+    Returns (grid, dropped) where dropped counts what the filters removed.
+
+    Out-of-range detections are **dropped, never clamped**.  ``np.clip`` on the lane index is the
+    tempting bug: with a 1-4 kHz window it would pile every sub-1 kHz sound in the file into the
+    lowest visible lane and paint a hot band that does not exist.  A filter must be able to say
+    "nothing here", which is only useful if it cannot lie about where the something went.
+    """
     grid = np.full((lanes, ncol), -np.inf)
+    dropped = {"freq": 0, "sev": 0}
     day0 = day_start if by_day else origin
     for d in dets:
         t = _wall(d)
         if t is None:
+            continue
+        band = int(np.searchsorted(edges, d.freq_hz, side="right") - 1)
+        if band < 0 or band >= lanes:            # outside the drawn window: drop, do not clamp
+            dropped["freq"] += 1
+            continue
+        v = _severity(d)
+        if min_sev is not None and v < min_sev:
+            dropped["sev"] += 1
             continue
         a = (t - day0).total_seconds()
         te = _end(d, t)
@@ -177,12 +195,10 @@ def _grid_for(dets, edges, lanes, origin, ncol, bucket_s, by_day, day_start=None
             a, b = max(a, 0.0), min(b, 86400.0)
         if not np.isfinite(a) or b <= a:
             continue
-        band = int(np.clip(np.searchsorted(edges, d.freq_hz, side="right") - 1, 0, lanes - 1))
         i0 = max(0, int(a // bucket_s))
         i1 = min(ncol, int(np.ceil(b / bucket_s)) + 1)
-        v = _severity(d)
         grid[band, i0:max(i0 + 1, i1)] = np.maximum(grid[band, i0:max(i0 + 1, i1)], v)
-    return grid
+    return grid, dropped
 
 
 def _end(d: Detection, t: datetime) -> datetime:
@@ -199,10 +215,18 @@ def _end(d: Detection, t: datetime) -> datetime:
 def build_day_map(dets: list[Detection], coverage: dict, cfg: Config, *,
                   lanes: int = 16, bucket_s: float = 60.0, lane_h: float = _LANE_H,
                   by_day: bool | None = None, top_labels: int = 8, cell_titles: bool = True,
+                  freq_lo: float | None = None, freq_hi: float | None = None,
+                  min_severity: float | None = None, stats: dict | None = None,
                   standalone: bool = False) -> str:
     """Return an SVG (inline in HTML, or standalone with ``standalone=True``).
 
     ``by_day`` defaults to True when the detections span more than one calendar day.
+
+    ``freq_lo``/``freq_hi`` window the frequency axis (detections outside them are dropped, not
+    folded into the edge lanes), and ``min_severity`` hides anything quieter than that many dB over
+    the local floor — dB for tones, robust z for impacts, the same number the colour ramp uses. Both
+    are **view filters**: the caption and the file both record what was filtered out, because a map
+    that silently drops data is indistinguishable from a site that silently makes none.
     """
     timed = [d for d in dets if d.t_start_wall]
     if not timed:
@@ -210,7 +234,11 @@ def build_day_map(dets: list[Detection], coverage: dict, cfg: Config, *,
                 "so nothing can be placed on a timeline. Name files "
                 "<code>YYYYMMDDTHHMMSS.flac</code> or pass <code>--tz</code>.</p>")
     nyq = 0.98 * 8000.0                                   # standard-mode analysis ceiling
-    edges = np.geomspace(cfg.min_freq, min(nyq, 7600.0), lanes + 1)
+    lo = float(cfg.min_freq if freq_lo is None else freq_lo)
+    hi = float(min(nyq, 7600.0) if freq_hi is None else min(freq_hi, nyq))
+    if not (0.0 < lo < hi):
+        raise ValueError(f"day map frequency window must satisfy 0 < low < high, got {lo}-{hi} Hz")
+    edges = np.geomspace(lo, hi, lanes + 1)
     starts = [_wall(d) for d in timed]
     t0 = min(starts)
 
@@ -245,7 +273,9 @@ def build_day_map(dets: list[Detection], coverage: dict, cfg: Config, *,
              f"viewBox='0 0 {width} {height}' width='100%' "
              f"style='background:{_BG};border-radius:4px' role='img' "
              f"aria-label='Day map: detections by frequency band over "
-             f"{'hour of day, one panel per day' if by_day else 'time'}'>"]
+             f"{'hour of day, one panel per day' if by_day else 'time'}, "
+             f"{lo:.0f}-{hi:.0f} Hz"
+             f"{'' if min_severity is None else f', {min_severity:g} dB over floor and above'}'>"]
     parts.append("<defs><pattern id='dm-norecorded' width='6' height='6' "
                  "patternUnits='userSpaceOnUse' patternTransform='rotate(45)'>"
                  "<rect width='6' height='6' fill='#1b1f24'/>"
@@ -254,9 +284,19 @@ def build_day_map(dets: list[Detection], coverage: dict, cfg: Config, *,
 
     kinds = {d.cls for d in timed}
     track_tags: dict[float, str] = {}
+    n_drop = {"freq": 0, "sev": 0}
+    painted = 0
     for pi, (dlab, origin) in enumerate(panels):
         top = _TOP + pi * pitch
-        grid = _grid_for(timed, edges, lanes, t0, ncol, bucket_s, by_day, day_start=origin)
+        grid, dropped = _grid_for(timed, edges, lanes, t0, ncol, bucket_s, by_day,
+                                  day_start=origin, min_sev=min_severity)
+        if pi == 0:
+            # Take the totals from one pass only. The band/severity tests run before the day test, so
+            # panel 0's counts ARE the global counts; accumulating across panels would multiply the
+            # headline number by the number of days (measured: 4 panels reported 54,784 dropped from
+            # 14,660 detections).
+            n_drop.update(dropped)
+        painted += int(np.isfinite(grid).sum())
 
         # --- cells. No per-cell <title> in the multi-day layout: it tripled the file size for a
         # tooltip that repeats itself once per day, and a 30-day map needs to stay openable.
@@ -324,7 +364,8 @@ def build_day_map(dets: list[Detection], coverage: dict, cfg: Config, *,
         # in a strip under their own panel and the labels are written once, at the bottom — the
         # same track is usually present every day, so repeating its name 30 times is noise.
         tones = sorted([d for d in timed
-                        if d.cls in ("A1", "A2") and _in_panel(d, origin, by_day)],
+                        if d.cls in ("A1", "A2") and lo <= d.freq_hz <= hi
+                        and _in_panel(d, origin, by_day)],
                        key=lambda d: -float(d.confidence or 0.0))
         seen: list[float] = []
         row = 0
@@ -364,12 +405,37 @@ def build_day_map(dets: list[Detection], coverage: dict, cfg: Config, *,
                      f"font-family='ui-monospace,monospace'>tone tracks: "
                      + " · ".join(track_tags.values()) + "</text>")
 
-    # --- legend
+    # --- legend: states the filters and what they removed, so the view cannot be misread as the record
+    if stats is not None:
+        stats.update(detections=len(timed), cells=painted, dropped_freq=n_drop["freq"],
+                     dropped_sev=n_drop["sev"], drawn=len(timed) - n_drop["freq"] - n_drop["sev"],
+                     freq_lo=lo, freq_hi=hi,
+                     min_severity=min_severity, panels=len(panels), lanes=lanes)
+    filt = f"{lo:.0f}-{hi:.0f} Hz"
+    if min_severity is not None:
+        filt += f", ≥{min_severity:g} over floor (z for impacts)"
+    drop = ""
+    if n_drop["freq"] or n_drop["sev"]:
+        drop = (f" — filtered out: {n_drop['freq']:,} outside the band, "
+                f"{n_drop['sev']:,} below the cut")
     parts.append(f"<text x='{_LEFT - 6:.1f}' y='{_TOP - 26:.1f}' fill='{_FG}' font-size='8' "
                  f"font-family='ui-monospace,monospace'>day map — max dB over the local floor "
-                 f"(z for impacts), {bucket_s / 60:.0f}-min buckets, "
+                 f"(z for impacts), {filt}, {bucket_s / 60:.0f}-min buckets, "
                  f"{'one panel per day, aligned on hour of day' if by_day else 'x = wall clock'}, "
-                 f"{', '.join(sorted(kinds))} present</text>")
+                 f"{', '.join(sorted(kinds))} present{drop}</text>")
+    if painted == 0:
+        # Everything was filtered away.  A blank canvas here is the exact false negative this tool
+        # exists to avoid, so say it in the middle of the picture, not in a caption nobody reads.
+        parts.append(f"<text x='{width / 2:.0f}' y='{_TOP + body_h / 2:.0f}' text-anchor='middle' "
+                     f"fill='#e8a33a' font-size='11' font-family='ui-monospace,monospace'>"
+                     f"EMPTY AFTER FILTERS: {len(timed):,} dated detections, 0 cells drawn"
+                     f" ({n_drop['freq']:,} outside {lo:.0f}-{hi:.0f} Hz, "
+                     f"{n_drop['sev']:,} under {min_severity if min_severity is not None else 0:g})"
+                     f"</text>")
+        parts.append(f"<text x='{width / 2:.0f}' y='{_TOP + body_h / 2 + 16:.0f}' "
+                     f"text-anchor='middle' fill='{_FG}' font-size='9' "
+                     f"font-family='ui-monospace,monospace'>this is a view setting, not a "
+                     f"measurement of the site — widen the band or lower the cut</text>")
     for i, v in enumerate([4, 8, 12, 18, 26, 34]):
         x = _LEFT + 300 + i * 26
         parts.append(f"<rect x='{x:.1f}' y='{_TOP - 32:.1f}' width='22' height='8' "

@@ -163,7 +163,17 @@ Three layout controls:
 | `--lane-h PX` | pixels per frequency lane. Default 18 (was 13); **24–30** if you are reading bands rather than scanning shape |
 | `--lanes N` | frequency lanes (geometric 20 Hz → 7.6 kHz). More lanes = finer frequency detail, taller map |
 | `--map-bucket S` | seconds per column (default 60) |
+| `--map-lo HZ` / `--map-hi HZ` | frequency window. Detections outside it are **dropped**, never folded into the nearest visible lane — a window that clamped would paint every sub-band sound as a hot band at the edge of the view |
+| `--map-cut DB` | hide cells under this many dB over the local floor (robust z for impacts — the same number the colour ramp uses) |
 | `--by-day` / `--single-panel` | one panel per calendar day with **x aligned on hour of day**, or one long wall-clock panel. Auto-selects `--by-day` when the data spans more than one day |
+
+Both filters are **view settings, not measurements**, so the map says what it hid. The caption
+carries the window and the drop counts (`331 of 5,023 detections drawn — 4,692 under the cut`), and
+a map filtered down to nothing prints `EMPTY AFTER FILTERS` across the middle rather than handing
+you a blank canvas that looks like a quiet site. What that cut reveals about the reference day is
+worth stating: the 5,014 impacts run at median z 10.1 (p95 21.3), so `--map-cut 20` keeps 330 of
+them plus the one 29.4 dB tone — i.e. the day's texture is individually *below* 20 over the floor,
+which is exactly why it reads as texture rather than as events.
 
 The day-aligned layout exists for multi-night surveys. Stacking one panel per day on a shared hour
 ruler turns "is Tuesday different?" into a shape comparison in the same column: on a synthetic
@@ -207,7 +217,7 @@ every output, because a report you cannot reproduce is a rumour.
 ## Tests
 
 ```bash
-.venv/bin/python -m pytest tests -q        # 130 tests, ~90 s, no audio files needed
+.venv/bin/python -m pytest tests -q        # 141 tests, ~90 s, no audio files needed
 ```
 
 Ground truth is injected and recovered: a tone added at 300–900 s comes back dated `0:05:00` for
