@@ -86,6 +86,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--min-tone-s", type=float, default=None, dest="min_tone_s")
     s.add_argument("--class", dest="klass", choices=["tonal", "transient", "all"], default="all",
                    help="restrict which detectors contribute to the output (FR-9)")
+    s.add_argument("--incremental", action="store_true",
+                   help="skip files an existing scan artifact in the output directory already "
+                        "covers (FR-8.8: the artifacts are the memory, there is no state file)")
     s.add_argument("--known", type=Path, default=None,
                    help="label detections against a known-source TOML (FR-7.3)")
     s.add_argument("--recall", action="store_true", help="relax thresholds, triage everything")
@@ -104,7 +107,26 @@ def build_parser() -> argparse.ArgumentParser:
                    help="files to analyse in parallel; 0 = auto (min of cores/2 and free RAM/260MB)")
     s.add_argument("--fail-on", type=float, default=None, dest="fail_on",
                    help="exit 3 if any detection's confidence reaches this value (FR-8.4)")
+    s.add_argument("--figure-top", type=int, default=40, dest="figure_top", metavar="N",
+                   help="cache evidence figures for the N most confident detections (FR-8.2c)")
+    s.add_argument("--figures-dir", type=Path, default=None, dest="figures_dir",
+                   help="where to cache them (default: <output dir>/figures)")
+    s.add_argument("--no-figures", action="store_true", dest="no_figures",
+                   help="skip the evidence cache (report from artifacts will then warn per card)")
     _add_map_args(s)
+
+    rp = sub.add_parser("report",
+                        help="build report.html from previous scan JSONs — never opens the audio")
+    rp.add_argument("artifacts", nargs="+", type=Path, metavar="SCAN.json",
+                    help="one or more --json outputs from earlier scans")
+    rp.add_argument("-o", "--out", type=Path, default=Path("report.html"))
+    rp.add_argument("--figures", type=Path, default=None,
+                    help="evidence-figure cache from those scans (default: alongside each JSON)")
+    rp.add_argument("--allow-mixed", action="store_true", dest="allow_mixed",
+                    help="merge artifacts made under different thresholds, and label the fact")
+    rp.add_argument("--known", type=Path, default=None)
+    rp.add_argument("--quiet", action="store_true")
+    _add_map_args(rp)
 
     m = sub.add_parser("daymap",
                        help="draw the day map from an EXISTING scan (no audio, no re-analysis)")
@@ -447,6 +469,66 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({"version": __version__}) if args.json else f"audioanalyzer {__version__}")
         return 0
 
+    if args.command == "report":
+        # Only load_run/merge_runs are imported here. build_timeline, group_sources, coverage_ledger,
+        # load_known, label and recurrence are already module-level imports, and re-importing them
+        # inside a branch makes them LOCAL to main() for every branch — which turned `scan` into an
+        # UnboundLocalError the first time this command was added. Import a name in one place.
+        from .artifact import load_run, merge_runs
+        try:
+            runs = [load_run(p) for p in args.artifacts]
+        except (OSError, ValueError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        try:
+            merged = merge_runs(runs, allow_mixed=args.allow_mixed)
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        dets, infos, cfg = merged["dets"], merged["infos"], merged["cfg"]
+        if args.known:
+            label(dets, load_known(args.known))
+        coverage = coverage_ledger(infos, cfg.gap_warn_s)
+        timeline = build_timeline(dets, cfg)
+        sources = group_sources(dets, cfg)
+        rec = recurrence(dets, cfg)
+        try:
+            from .report_html import build_report
+        except ImportError as exc:
+            print(f"error: report could not load ({exc})", file=sys.stderr)
+            return 1
+        out = args.out
+        out = out / "report.html" if out.is_dir() or str(args.out).endswith("/") else out
+        fdir = args.figures or (Path(args.artifacts[0]).parent / "figures")
+        frames = {Path(i.path).name: int(i.frames) for i in infos}
+        map_svg = None
+        if len(dets) > 20:
+            from .daymap import build_day_map
+            map_svg = build_day_map(dets, coverage, cfg, lanes=args.lanes, lane_h=args.lane_h,
+                                    bucket_s=args.map_bucket, by_day=args.by_day,
+                                    freq_lo=args.map_lo, freq_hi=args.map_hi,
+                                    min_severity=args.map_cut)
+        try:
+            p = build_report([i.path for i in infos], dets, sources, coverage, cfg, out,
+                             media={}, timeline=timeline, day_map=map_svg,
+                             figures_dir=fdir if fdir.exists() else None, frames=frames)
+        except Exception as exc:
+            print(f"error: report from artifacts failed ({type(exc).__name__}: {exc})",
+                  file=sys.stderr)
+            return 1
+        if not args.quiet:
+            st = merged["stats"]
+            print(f"wrote {p} ({p.stat().st_size / 1e6:.2f} MB, self-contained)")
+            print(f"  from {st['runs']} artifact(s): {st['unique']:,} unique detection(s) over "
+                  f"{len(infos)} recording(s); NO AUDIO WAS READ")
+            if st["conflicts"]:
+                print(f"  note: {st['conflicts']} duplicated detection(s) disagreed on a measured "
+                      f"field (kept the first) — the runs are not identical")
+            if st["gating_diff"]:
+                print(f"  mixed thresholds merged (--allow-mixed): {', '.join(st['gating_diff'])}")
+            print(f"  evidence figures: {'from ' + str(fdir) if fdir.exists() else 'none cached — cards will say so'}")
+        return 0
+
     if args.command == "doctor":
         return _doctor(list(args.files), args.json)
 
@@ -661,6 +743,44 @@ def main(argv: list[str] | None = None) -> int:
         else:
             paths.append(pattern)
 
+    if getattr(args, "incremental", False):
+        # FR-8.8: the memory is the artifacts, not a ledger. (basename, frames) is the file's
+        # identity — a re-encode changes frames, and a restored-or-renamed file either matches a
+        # recorded artifact or is new; there is no stale entry to skip it wrongly.
+        from .artifact import load_run, scanned_set
+        here = Path(args.json).resolve() if args.json else None
+        out_dir = Path(args.json).parent if args.json else Path(".")
+        prior: list = []
+        for cand in sorted(out_dir.glob("*.json")):
+            if here is not None and cand.resolve() == here:
+                continue                     # do not treat this run's own output as prior history
+            try:
+                prior.append(load_run(cand))
+            except (OSError, ValueError):
+                continue                       # configs, package.json, anything else in that dir
+        covered = scanned_set(prior)
+        if not covered:
+            print("incremental: no prior artifacts found next to the output, scanning everything",
+                  file=sys.stderr)
+        keep, skipped = [], 0
+        for path in paths:
+            try:
+                key: tuple | None = (path.name, int(sf.info(str(path)).frames))
+            except Exception:                       # noqa: BLE001 - preflight reports it next
+                key = None
+            if key is not None and key in covered:
+                skipped += 1
+            else:
+                keep.append(path)
+        if not args.quiet and skipped:
+            print(f"incremental: skipping {skipped} of {len(paths)} file(s) already covered by "
+                  f"{len(prior)} prior artifact(s) in {out_dir}")
+        paths = keep
+        if not paths:
+            if not args.quiet:
+                print("incremental: nothing new to analyse")
+            return 0
+
     if args.report:                                   # FR-8.4: fail before the expensive work
         rc = _require_optional("matplotlib", "report", "--report")
         if rc:
@@ -695,6 +815,21 @@ def main(argv: list[str] | None = None) -> int:
     if len(paths) > 1 and not args.quiet:
         print(_render_corpus(paths, sources, coverage, cfg, rec, n_labelled, timeline))
 
+    frames_by_base = {Path(str(s["media"]["path"])).name: int(s["media"]["frames"])
+                      for s in summaries if s.get("media")}
+    fdir = Path(args.figures_dir) if args.figures_dir else \
+        ((Path(args.report).parent if args.report else (Path(args.json).parent if args.json
+                                                        else Path("out"))) / "figures")
+    if not args.no_figures and (args.report or args.json):
+        # FR-8.2c: evidence figures are rendered once, here, while the audio is in hand. A report
+        # rebuilt later from the JSON (possibly on a machine with no recordings) then draws the same
+        # pictures instead of quietly drawing none.
+        from .figures import write_cache
+        fstat = write_cache(all_dets, cfg, fdir, top=args.figure_top, frames=frames_by_base)
+        if not args.quiet:
+            print(f"cached {fstat['written']} evidence figure(s) "
+                  f"({fstat['reused']} reused) for the top {fstat['attempted']} of "
+                  f"{fstat['total_detections']:,} detections in {fdir}")
     if args.csv:
         n = write_csv(all_dets, args.csv)
         if not args.quiet:
@@ -723,7 +858,9 @@ def main(argv: list[str] | None = None) -> int:
                                     freq_lo=args.map_lo, freq_hi=args.map_hi,
                                     min_severity=args.map_cut)
             p = build_report([str(x) for x in paths], all_dets, sources, coverage, cfg, out,
-                             media=media, timeline=timeline, day_map=map_svg)
+                             media=media, timeline=timeline, day_map=map_svg,
+                             figures_dir=fdir if not args.no_figures else None,
+                             frames=frames_by_base)
         except Exception as exc:
             print(f"error: report generation failed after the analysis ({type(exc).__name__}: "
                   f"{exc}); the CSV and JSON are complete and valid", file=sys.stderr)

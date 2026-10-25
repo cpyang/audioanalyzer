@@ -1,6 +1,6 @@
 # Audio Anomaly Analyser — Requirements
 
-Status: v0.6 implemented (141 tests green); v0.7 adds FR-8.2c/8.7/8.8 — artifact-first outputs
+Status: v0.7 implemented (160 tests green) — M0–M6, artifact-first outputs in FR-8.2c/8.7/8.8
 Date: 2026-10-25
 Owner: (unassigned)
 Reference corpus: `/home/cpyang/Audio/20261023T070002.flac`
@@ -610,11 +610,28 @@ Whole-day throughput and memory (NFR-4/5): **see §2.3** for the census and tota
   like a quiet site, and `--map-lo >= --map-hi` fails before analysis rather than after 4½ minutes.
   Measured on the reference day: `--map-cut 20` keeps 331 of 5,023 detections — 330 impacts and the
   single 29.4 dB tone — because the impact population sits at median z 10.1. **141 tests green.**
-* **M6 (next) — artifact-first outputs (FR-8.2c, FR-8.7, FR-8.8).** Requirement reviewed and written
-  2026-10-25; not yet implemented. Order, cheapest-until-correct-first: (1) fix the
-  `spectrogram_crop` axis bug and add the two-images-per-card test, because every later step renders
-  through that function and the report's evidence is currently 0 % spectrograms; (2) figure cache at
-  scan time; (3) `report` from 1..N JSONs with identity-dedupe and fingerprint check; (4)
+* **M6 (v0.7.0, 2026-10-25) — artifact-first outputs: DONE.** `report SCAN.json […]` builds the
+  whole report from 1..N previous runs, opening no FLAC; `scan --incremental` skips what an existing
+  artifact already covers, with **no state file** — the artifacts are the memory, because a ledger
+  rots on moved or re-encoded files and a stale skip is a silent false negative. Evidence figures
+  became cached artifacts (top 40 detections + one overview per recording, ~1 MB/night), keyed by
+  (basename, frames, key) so a path typed differently cannot fragment them.
+  Two defects fell out of building this. (1) **FR-8.2's spectrogram crop had never rendered:**
+  `db[fband]` applied a bin mask to the frame axis, raising on 100 % of calls, and `_card`'s
+  `except Exception` turned that into no spectrograms at all — the reference day's report shipped
+  12 cards, 12 images, all waveforms. Nothing could have caught it: the HTML tests asserted the
+  *absence* of external URLs, which rewards fewer images. Fixed, plus tests asserting a card carries
+  two images and that a −45 dBFS sine reads −45 dB in the crop. (2) `add_tone` silently returned the
+  input unchanged when `t1 <= t0`, so a call written as `(..., t0=20, 15)` — reading an absolute end
+  time as a duration — injects nothing and every later assertion runs against silence. It raises now
+  (one of my own probes hit exactly this and reported a tone at the noise floor).
+  Merge hazards handled explicitly: dedupe by input identity, derived views recomputed rather than
+  merged, argument-order-independent output, and refusal to blend artifacts made under different
+  thresholds unless `--allow-mixed` labels the fact. **160 tests green.**
+* **M6 (planning record, 2026-10-25) — requirement reviewed, then implemented above.** Order chosen:
+  (1) fix the `spectrogram_crop` axis bug and add the two-images-per-card test first, because every
+  later step renders through that function and the report's evidence was 0 % spectrograms; (2) figure
+  cache at scan time; (3) `report` from 1..N JSONs with identity-dedupe and fingerprint check; (4)
   `--incremental`, which falls out of (3) once the scanned set is derivable from the artifacts.
   Estimate: (1) small, (2) small, (3) the real work — merge semantics and the honesty checks.
 * **M5 (later)** — cross-night trending, optional ML classifier, capture-side integration.

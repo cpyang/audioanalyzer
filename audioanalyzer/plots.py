@@ -39,13 +39,18 @@ def _cmap() -> Colormap:
     return colormaps["magma"].copy()
 
 
-def spectrogram_crop(path: str | Path, t_center: float, f_center: float, cfg: Config,
-                     span_s: float = 30.0, span_hz: float = 1000.0,
-                     fs: int | None = None, nperseg: int = 1024,
-                     db_range: tuple[float, float] | None = None) -> str:
-    """dB-colourmap spectrogram around (t_center, f_center), y in Hz (FR-8.2)."""
+def crop_grid(path: str | Path, t_center: float, f_center: float, cfg: Config, *,
+              span_s: float = 30.0, span_hz: float = 1000.0,
+              nperseg: int = 1024) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Return (t, freqs_in_band, dB[bins, frames]) around a point.
+
+    Split out of `spectrogram_crop` so the geometry can be asserted numerically. A PNG that renders
+    is not evidence the picture is right — the bug this function exists to prevent produced a valid
+    image path that raised before ever reaching a file, and its cousin (axes swapped) would have
+    produced a plausible-looking image of the wrong thing.
+    """
     with sf.SoundFile(str(path)) as fh:
-        sr = fs or fh.samplerate
+        sr = fh.samplerate
         total = fh.frames
         hop = max(1, nperseg // 4)
         t0 = max(0.0, t_center - span_s / 2.0)
@@ -56,7 +61,7 @@ def spectrogram_crop(path: str | Path, t_center: float, f_center: float, cfg: Co
     if x.ndim > 1:
         x = x.mean(axis=1)
     if x.size < nperseg + hop:
-        return ""
+        return np.array([]), np.array([]), np.zeros((0, 0))
     frames = 1 + (x.size - nperseg) // hop
     idx = np.arange(nperseg)[None, :] + hop * np.arange(frames)[:, None]
     win = np.hanning(nperseg)
@@ -68,12 +73,27 @@ def spectrogram_crop(path: str | Path, t_center: float, f_center: float, cfg: Co
     if fband.sum() < 3:
         fband = np.ones(freqs.size, dtype=bool)
     t = (np.arange(frames) * hop + nperseg / 2.0) / sr + t0
+    return t, freqs[fband], db[:, fband].T
+
+
+def spectrogram_crop(path: str | Path, t_center: float, f_center: float, cfg: Config,
+                     span_s: float = 30.0, span_hz: float = 1000.0,
+                     nperseg: int = 1024,
+                     db_range: tuple[float, float] | None = None) -> str:
+    """dB-colourmap spectrogram around (t_center, f_center), y in Hz (FR-8.2).
+
+    The unused ``fs=`` parameter was dropped here: nothing in the tool ever passed it, and a
+    parameter that a helper quietly ignores is where the next wrong-axis bug hides.
+    """
+    t, fb, z = crop_grid(path, t_center, f_center, cfg, span_s=span_s, span_hz=span_hz,
+                         nperseg=nperseg)
+    if z.size == 0:
+        return ""
     fig = Figure(figsize=(7.2, 2.6))
     ax = fig.add_subplot(111)
-    vmin, vmax = db_range or (np.percentile(db[fband], 5), np.percentile(db[fband], 99.5))
-    ax.pcolormesh(t, freqs[fband], db[fband], shading="gouraud", cmap=_cmap(),
-                  vmin=vmin, vmax=vmax)
-    ax.set_ylim(freqs[fband][[0, -1]])
+    vmin, vmax = db_range or (np.percentile(z, 5), np.percentile(z, 99.5))
+    ax.pcolormesh(t, fb, z, shading="gouraud", cmap=_cmap(), vmin=vmin, vmax=vmax)
+    ax.set_ylim(fb[[0, -1]])
     ax.set_xlim(t[[0, -1]])
     ax.set_ylabel("Hz")
     ax.tick_params(colors="#cfd6dd", labelsize=7)

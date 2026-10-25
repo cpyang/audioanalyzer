@@ -11,14 +11,15 @@ how weird the frequency is.
 
 from __future__ import annotations
 
+import base64
 import html
 import json
 from pathlib import Path
 
 from . import __version__
 from .config import Config
+from .figures import overview_figure, spans
 from .models import Detection
-from .plots import overview_spectrogram, spectrogram_crop, waveform_zoom
 
 _CSS = """
 body{background:#0d1116;color:#c9d1d9;font:14px/1.5 -apple-system,Segoe UI,Roboto,sans-serif;margin:24px}
@@ -55,7 +56,7 @@ document.querySelectorAll('th').forEach(h=>h.onclick=()=>sortT(h));
 def build_report(files: list[str], dets: list[Detection], sources: list, coverage: dict,
                  cfg: Config, out_path: str | Path, top_figures: int = 12,
                  media: dict | None = None, timeline: list | None = None,
-                 day_map: str | None = None) -> Path:
+                 day_map: str | None = None, figures_dir=None, frames: dict | None = None) -> Path:
     """Write one self-contained HTML report and return its path (FR-8.2)."""
     out_path = Path(out_path)
     parts = [f"<!doctype html><html><head><meta charset='utf-8'>",
@@ -118,19 +119,19 @@ def build_report(files: list[str], dets: list[Detection], sources: list, coverag
     if ordered:
         parts.append(f"<h2>Evidence — top {len(ordered)} by confidence</h2>")
         for d in ordered:
-            parts.append(_card(d, cfg))
+            parts.append(_card(d, cfg, figures_dir, frames))
 
     if files and len(files) <= 3:
         parts.append("<h2>Overview spectrograms</h2>")
         for f in files:
-            try:
-                png = overview_spectrogram(f, cfg)
-            except Exception as exc:                       # noqa: BLE001 - report must still exist
-                png = ""
-                parts.append(f"<p class='warn'>overview failed for {_h(f)}: {_h(str(exc))}</p>")
+            png = overview_figure(f, cfg, figures_dir, (frames or {}).get(Path(str(f)).name))
             if png:
-                parts.append(f"<div class='card'><b>{_h(Path(f).name)}</b>"
-                             f"<img src='data:image/png;base64,{png}'></div>")
+                parts.append(f"<div class='card'><b>{_h(Path(str(f)).name)}</b>"
+                             f"<img src='data:image/png;base64,{base64.b64encode(png).decode()}'></div>")
+            else:
+                parts.append(f"<p class='warn'>overview unavailable for {_h(Path(str(f)).name)}: "
+                             f"the recording is not reachable and the scan did not cache it"
+                             f"</p>")
 
     parts.append("<h2>Configuration and thresholds</h2>")
     parts.append(f"<pre>{_h(json.dumps(cfg.to_dict(), indent=2, default=str))}</pre>")
@@ -193,19 +194,36 @@ def _source_table(sources: list) -> str:
     return (f"<table><thead><tr>{head}</tr></thead><tbody>{''.join(rows)}</tbody></table>")
 
 
-def _card(d: Detection, cfg: Config) -> str:
-    span_s = 0.2 if d.cls == "A4" else 30.0
-    span_hz = 1000.0 if d.cls != "A3" else max(200.0, 0.2 * d.freq_hz)
-    t_c = d.t_start_s + d.duration_s / 2.0
-    try:
-        crop = spectrogram_crop(d.file, t_c, d.freq_hz, cfg, span_s=span_s, span_hz=span_hz)
-    except Exception as exc:                               # noqa: BLE001
-        crop = ""
-    try:
-        wave = waveform_zoom(d.file, d.t_start_s + (d.duration_s / 2.0 if d.cls != "A4" else 0.0),
-                             cfg, span_s=0.5 if d.cls == "A4" else 1.0)
-    except Exception:                                      # noqa: BLE001
-        wave = ""
+def _evidence(d: Detection, cfg: Config, figures_dir=None, frames: dict | None = None):
+    """(png bytes by kind, warning string) for one card — cache first, then audio, then say so.
+
+    The order matters for FR-8.7: a report built from artifacts with no recordings in reach must
+    still show the evidence the scan captured, and when even the cache has nothing it must state
+    which figure is missing and how to make it. An empty <img> slot is forbidden, because a blank
+    box next to a detection reads as "nothing interesting in the spectrum".
+    """
+    from .figures import identity, load, render
+    stem = identity(d, (frames or {}).get(Path(str(d.file)).name))
+    got = load(figures_dir, stem) if figures_dir else {}
+    missing = [k for k in ("spectrogram", "waveform") if k not in got]
+    if missing:
+        live = render(d, cfg)
+        for k, v in live.items():
+            got.setdefault(k, v)
+        missing = [k for k in ("spectrogram", "waveform") if k not in got]
+        if figures_dir and live:
+            from .figures import write_cache
+            write_cache([d], cfg, figures_dir, top=1, frames=frames)
+    warn = ""
+    if missing:
+        warn = (f"<p class='warn'>evidence figure(s) missing: {', '.join(missing)} — the recording "
+                f"cannot be opened and the scan did not cache it. Regenerate with "
+                f"<code>audioanalyzer scan {_h(str(d.file))} --report DIR</code></p>")
+    return got, warn
+
+
+def _card(d: Detection, cfg: Config, figures_dir=None, frames: dict | None = None) -> str:
+    got, warn = _evidence(d, cfg, figures_dir, frames)
     meta = (f"<b class='pill {d.cls}'>{d.cls}</b> {d.freq_hz:.2f} Hz — tone-to-noise "
             f"{d.tone_noise_db:.1f} dB, coherence {d.coherence:.2f}, level {d.level_dbfs:.1f} dBFS, "
             f"t={_t_hms(d.t_start_s)} for {d.duration_s:.1f} s, {d.n_episodes} episode(s) "
@@ -214,9 +232,19 @@ def _card(d: Detection, cfg: Config) -> str:
     if sig:
         meta += "<br><span class='meta'>rang at " + ", ".join(
             f"{s['freq_hz']:.0f} Hz (+{s['rise_db']:.0f} dB)" for s in sig) + "</span>"
-    return (f"<div class='card'>{meta}"
-            + (f"<img src='data:image/png;base64,{crop}'>" if crop else "")
-            + (f"<img src='data:image/png;base64,{wave}'>" if wave else "") + "</div>")
+    imgs = ""
+    for kind in ("spectrogram", "waveform"):
+        if kind not in got:
+            continue
+        if kind == "spectrogram":
+            s_s, s_hz = spans(d)
+            cap = f"spectrogram ±{s_s:g} s, ±{s_hz:g} Hz"
+        else:
+            cap = f"waveform ±{(0.25 if d.cls == 'A4' else 0.5):g} s"
+        b64 = base64.b64encode(got[kind]).decode("ascii")
+        imgs += (f"<div class='fig'><img src='data:image/png;base64,{b64}' alt='{kind}'>"
+                 f"<div class='figcap'>{cap}</div></div>")
+    return f"<div class='card'>{meta}{imgs}{warn}</div>"
 
 
 def _h(s) -> str:

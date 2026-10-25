@@ -181,19 +181,57 @@ three-day test (day B silent 02:00–04:00, day C drifted +90 min), day B's 02�
 2 and 0 against day A's 105 and 146, and day C's busiest hour moves 18:00 → 20:00 — visible without
 having to remember where yesterday's evening sat.
 
-### Redrawing without re-analysing
+### Reports and maps from artifacts — no re-scanning
 
-The map is computed from detections, not audio, so it can be rebuilt from a previous run's
-artifact. This is the difference between iterating on layout for 0.8 s and for 4½ minutes:
+`scan.json` is a complete record of a run, so the report and the day map can be rebuilt from it
+without opening a single FLAC:
 
 ```
-audioanalyzer daymap out/scan.json -o out/daymap.svg --by-day --lane-h 24
+audioanalyzer report out/scan-2026-10-23.json -o out/report.html
+audioanalyzer report out/scan-2026-*.json -o out/week.html   # merged across nights
+audioanalyzer daymap out/scan.json -o out/daymap.svg --by-day
 ```
 
-Point it at the **JSON**: it carries the coverage ledger (so unrecorded intervals stay hatched),
-the config that run used, and `z_peak`, which is what colours an impact. A CSV works but has none of
-those, and the command says so. Spectrograms still do the job they are good at: ±30 s evidence crops
-beside each detection.
+Merging artifacts follows two rules, both because a report that looks internally consistent can
+still be wrong:
+
+* **Identity is (filename, frame count, detection key), never the stored path.** A path is kept
+  exactly as typed, so scanning `~/Audio` and `./` describes the same recording twice under two
+  strings — and the merged census, timeline and recurrence would all double without any symptom.
+* **Derived views are recomputed, never merged.** Two `sources` blocks each contain a feature that
+  straddles their boundary; concatenating them counts it twice and invents episodes.
+
+If the artifacts were produced under **different thresholds**, `report` refuses and explains which
+gate differs — one confidence column across different gates is a false comparison. `--allow-mixed`
+merges anyway and labels the fact. Argument order cannot change the output: `report a.json b.json`
+and `report b.json a.json` are byte-identical.
+
+**The evidence figures come from a cache the scan writes.** Figures are the only part of a report
+that needs the audio, so the scan renders them once while it has it — the top `--figure-top` (40)
+detections plus one overview per recording, ~1 MB a night — and a later report reads the cache. A
+card whose figure is missing says so and names the command that would have made it, because an empty
+box beside a detection reads as "nothing interesting in the spectrum". `--no-figures` skips the
+cache; `--figures DIR` points a report at one.
+
+This closes a defect that ran the project's whole length: the crop call had a transposed index
+(`db[fband]` selects *frames* by a mask built for *bins*), so it raised on 100 % of calls and the
+report's `except Exception` turned that into no spectrograms at all — the reference day's report
+shipped 12 cards with 12 images, all waveforms. No test could have caught it: the HTML assertions
+checked the *absence* of external URLs, which rewards producing fewer images. There is now a test
+that a card contains two images, and one that a −45 dBFS sine reads −45 dB in the crop.
+
+### Incremental scanning
+
+```
+audioanalyzer scan /data/night-02/ --json out/scan-2026-10-24.json --incremental
+```
+
+`--incremental` skips any recording an existing artifact in the output directory already covers —
+matched by filename and frame count. **There is no state file**: the artifacts are the memory. A
+separate ledger was rejected deliberately, because ledgers rot when files are moved, restored or
+re-encoded, and a stale skip is a silent false negative — while an artifact that failed to record a
+file is simply an artifact that is not there, which is checkable. One JSON per range, never an
+append to a growing one: a bad run gets deleted, not unpicked out of a singleton.
 
 `report.html` is self-contained (figures embedded as base64): sortable table, per-detection
 spectrogram + waveform crops, coverage ledger stating what was never recorded.
@@ -217,7 +255,7 @@ every output, because a report you cannot reproduce is a rumour.
 ## Tests
 
 ```bash
-.venv/bin/python -m pytest tests -q        # 141 tests, ~90 s, no audio files needed
+.venv/bin/python -m pytest tests -q        # 160 tests, ~3 min, no audio files needed
 ```
 
 Ground truth is injected and recovered: a tone added at 300–900 s comes back dated `0:05:00` for

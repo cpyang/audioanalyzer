@@ -33,7 +33,12 @@ def add_tone(x: np.ndarray, fs: int, freq: float, level_dbfs: float,
     i0, i1 = int(round(t0 * fs)), int(round(t1 * fs))
     i1 = min(i1, x.size)
     if i1 <= i0:
-        return x
+        # Used to return x unchanged, so a call written as (..., t0=20.0, 15.0) -- reading the last
+        # argument as a DURATION when it is an absolute end time -- injected nothing and every later
+        # assertion ran against silence. Measured: this exact mistake produced a probe whose "tone"
+        # read -85 dB, the noise floor, until the geometry was checked against a bare sine.
+        raise ValueError(f"add_tone: t1={t1:g} s must be after t0={t0:g} s "
+                         f"(t1 is an absolute end time, not a duration)")
     n = np.arange(i1 - i0)
     a = 10.0 ** (level_dbfs / 20.0)
     x[i0:i1] += a * np.sin(2 * math.pi * freq * n / fs + phase)
