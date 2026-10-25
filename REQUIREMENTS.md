@@ -1,7 +1,7 @@
 # Audio Anomaly Analyser — Requirements
 
-Status: v0.4 — M0–M4 implemented and tested (121 tests green); whole-day verification in §2.3/§7.1
-Date: 2026-10-24
+Status: v0.6 implemented (141 tests green); v0.7 adds FR-8.2c/8.7/8.8 — artifact-first outputs
+Date: 2026-10-25
 Owner: (unassigned)
 Reference corpus: `/home/cpyang/Audio/20261023T070002.flac`
 Related: `@file:20261023T070002.flac`
@@ -376,6 +376,59 @@ control; dashboards or DB backends; GUI.
   tool cannot scan at all — a missing `--report` extra is a warning, because CSV/JSON still work.
   Added after a field machine ran a whole day and then died on `import matplotlib`: an environment
   question must cost seconds, not the run.
+* 8.2c **Evidence figures are an artifact, not a render** (added 2026-10-25, review of FR-8.2/8.7).
+  A scan caches the figures it renders for the top `--figure-top` (default 40) detections by
+  confidence as `out/figures/<identity>-<kind>.png`, where `<identity>` is
+  `sha1(basename|frames|key())` — the path-as-given is NOT part of it, because `d.file` stores the
+  path exactly as typed, so `dir/x.flac` and `x.flac` must resolve to the same evidence. A report
+  built without audio uses the cache, and a card whose figure is missing says so **with the exact
+  command that would have made it** (`scan <file> --report`) rather than rendering a quiet blank
+  box: an absent image must never look like an unremarkable spectrum.
+  **The spectrogram crop is broken today and this FR exists partly to force the fix.**
+  `plots.py` slices a (frames × bins) array with a bin mask (`db[fband]`, selecting rows), so
+  `spectrogram_crop` raises `IndexError` on essentially every call — measured: 1872 vs 513 for an
+  A2 crop, 9 vs 513 for an A4 — and `_card`'s `except Exception: crop = ""` swallows it. The whole
+  day's report therefore shipped 12 cards with 12 images: a waveform each, **zero spectrograms** —
+  i.e. the one figure that distinguishes a tone from its noise floor, which is the stated purpose of
+  the section (FR-8.2). No test could have caught this: nothing asserted an image exists, and the
+  report's main HTML assertion is "no `http://` in the output", which rewards fewer images.
+  Required: correct the slice, and a test asserting a card for a real detection contains **two**
+  images, so the section can never silently degrade again.
+
+### FR-8.7 Report from artifacts (no audio)
+`audioanalyzer report SCAN.json [SCAN2.json …] -o report.html` builds the whole report from 1..N
+previous runs, opening no FLAC. Feasible because every corpus view already takes detections plus
+media metadata: `coverage_ledger` needs only `capture_start`/`duration_s` (both in `files[].media`),
+and `build_timeline`/`group_sources`/`recurrence`/the day map need only detections. Rules:
+* **Identity and dedupe.** Two artifacts can describe the same recording (rescanned, or the same
+  directory reached by different path spellings). A detection's identity is
+  `(basename, frames, key())` — never the stored path string. Duplicates collapse to one;
+  *conflicting* duplicates (same identity, different fields) are reported as a count, not silenced,
+  because that means two different tool versions or thresholds saw the same audio.
+* **Recompute, never merge, the corpus views.** Merging two `sources` or `recurrence` blocks
+  double-counts any feature that straddles the run boundary. The merged detection set is the input;
+  timeline, sources, recurrence, coverage and the day map are derived from it in one pass.
+* **Refuse mixed thresholds.** Each artifact carries `tool.version` + its config. If they disagree
+  on a threshold that gates a detection, `report` exits 1 by default: a single "confidence" column
+  over runs with different gates is a false comparison. `--allow-mixed` merges anyway and then
+  states per section which runs contributed, so the comparison is at least labelled.
+* **Determinism.** NFR-6 applies across artifacts: the merged order is by wall clock then identity,
+  never by argument order, so `report a.json b.json` and `report b.json a.json` are byte-identical.
+* **Provenance.** The report header states it was built from N artifacts covering X s at Y%
+  coverage, names them, and says explicitly that no audio was read — an artifact-only report must be
+  distinguishable from a fresh scan report at a glance, not by reading the source.
+
+### FR-8.8 Incremental scan (no state ledger)
+`audioanalyzer scan DIR --incremental` analyses only the files it has not already analysed, then
+refreshes the report. **The already-scanned set is derived from the existing per-range artifacts,
+not from a state file**: each `scan-<range>.json` lists its files with basename, frames, size,
+mtime and `capture_start`, so the union of artifacts *is* the memory. A separate ledger was rejected
+— ledgers rot (moved, re-encoded or restored files make a stale skip, and a stale skip is a silent
+false negative), whereas an artifact that failed to record a file is simply an artifact that is not
+there. Output is a NEW file per range (`out/scan-20261026.json`), never an append to a growing one:
+per-range files stay diffable, re-mergeable and safe to copy off the machine, and a bad run is
+deleted rather than unpicked out of a singleton. Naming is by covered span, from `capture_start` of
+the first and last file, so the filename states what it covers.
 
 ### FR-9 CLI (surface, names may change)
 ```
@@ -383,6 +436,12 @@ audioanalyzer scan  FILE...         [-c cfg.toml] [--mode standard|hr] [--min-pr
                                     [--class tonal|transient|all] [--top N] [--report DIR]
                                     [--csv F] [--json F] [--tz TZ] [--min-freq/--max-freq]
                                     [-J N]   (files in parallel; 0 = auto, 1 = serial)
+                                    [--incremental]  (skip files already covered by an artifact)
+                                    [--figure-top N] [--no-figures]
+audioanalyzer report JSON...        -o report.html [--figures DIR] [--allow-mixed]
+                                    (build from 1..N artifacts; never opens audio)  [FR-8.7]
+audioanalyzer daymap JSON           -o daymap.svg [--by-day] [--lanes N] [--lane-h PX]
+                                    [--map-lo/--map-hi/--map-cut/--map-bucket]
 audioanalyzer profile  REF...       -o baseline.npz
 audioanalyzer compare  FILE --baseline baseline.npz
 audioanalyzer periodic FILE...      [--report DIR]
@@ -551,6 +610,13 @@ Whole-day throughput and memory (NFR-4/5): **see §2.3** for the census and tota
   like a quiet site, and `--map-lo >= --map-hi` fails before analysis rather than after 4½ minutes.
   Measured on the reference day: `--map-cut 20` keeps 331 of 5,023 detections — 330 impacts and the
   single 29.4 dB tone — because the impact population sits at median z 10.1. **141 tests green.**
+* **M6 (next) — artifact-first outputs (FR-8.2c, FR-8.7, FR-8.8).** Requirement reviewed and written
+  2026-10-25; not yet implemented. Order, cheapest-until-correct-first: (1) fix the
+  `spectrogram_crop` axis bug and add the two-images-per-card test, because every later step renders
+  through that function and the report's evidence is currently 0 % spectrograms; (2) figure cache at
+  scan time; (3) `report` from 1..N JSONs with identity-dedupe and fingerprint check; (4)
+  `--incremental`, which falls out of (3) once the scanned set is derivable from the artifacts.
+  Estimate: (1) small, (2) small, (3) the real work — merge semantics and the honesty checks.
 * **M5 (later)** — cross-night trending, optional ML classifier, capture-side integration.
   Before any of that: the **listening calibration** (R13) and a **multi-night corpus** (FR-7.2's
   day-of-week claim is not testable on one day), because the numbers in §2.3 are machine-truth
@@ -605,6 +671,8 @@ Still open (do not block M1 on these):
 | R12 | **Coherent artefacts that no gate can reject:** the resampling spur at Nyquist scores phase coherence 0.97 — indistinguishable from a motor whine by measurement alone | Explicit `nyquist_guard = 0.98` band exclusion (R1/R3), reported as a guard rather than hidden; `known.toml` naming for what the site says these lines are; confirmation sweep at 48 kHz if a near-band-edge line ever matters |
 | R13 | A4's real-audio false-positive rate is unmeasured — synthetic rumble says 0/hour, one real hour said 73–205/hour | Report events per hour and per band so the noise is visible; `--class tonal` to suppress; needs a labelled ~2 h listening pass to set the operating point |
 | R14 | **Environment and parallelism fail late, not early.** A missing optional dep (matplotlib) surfaced only at the report step of a 38-minute run; and a naive parallel sweep either oversubscribes FFT threads (worker measured ~205 % CPU, so `cores` workers thrash) or multiplies a 210 MB working set past free RAM | `--report` and every input file are checked before analysis starts (exit 1/2 in seconds); extras declared in `pyproject.toml`; worker count auto-sized `min(cores/2, MemAvailable/260 MB)` with `-J` to override; corpus views assembled in the parent in input order so parallel and serial output are byte-identical |
+| R15 | **A broad `except Exception` in a rendering path turns a total failure into a plausible-looking output.** `spectrogram_crop` raised on 100 % of calls and the report shipped 12 cards with 12 images — waveforms only, no spectrograms — for the entire reference day, undetected, because the HTML test asserted the absence of external URLs rather than the presence of evidence | Crops must not be optional in the artifact-only design: figure cache (FR-8.2c) plus a test asserting a real detection's card carries **two** images; rendering failures must appear as a visible card-level warning, never a silent empty string |
+| R16 | **Merging artifacts can double-count or silently compare different thresholds.** Two runs over the same directory (different path spellings, or a rescanned night) describe the same detections; and a run under different gates produces confidences that are not comparable in one column | Detection identity is `(basename, frames, key())`, never the stored path; corpus views are recomputed over the merged set rather than merged; mismatched config/version fingerprints abort unless `--allow-mixed`, which then labels per section (FR-8.7) |
 
 ---
 
