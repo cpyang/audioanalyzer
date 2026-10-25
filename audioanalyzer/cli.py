@@ -44,6 +44,24 @@ class _Parser(argparse.ArgumentParser):
         self.exit(1, f"{self.prog}: error: {message}\n")
 
 
+def _add_map_args(p: argparse.ArgumentParser) -> None:
+    """Day-map layout knobs, shared by `scan` (which draws it after analysing) and `daymap`
+    (which draws it from an existing artifact)."""
+    p.add_argument("--lanes", type=int, default=16, metavar="N",
+                   help="frequency lanes on the day map (geometric spacing 20 Hz..7.6 kHz; "
+                        "more lanes = finer frequency detail)")
+    p.add_argument("--lane-h", type=float, default=18.0, metavar="PX", dest="lane_h",
+                   help="pixels per frequency lane — raise it when the bands are hard to read "
+                        "(default 18; 24-30 is comfortable, at the cost of a taller map)")
+    p.add_argument("--map-bucket", type=float, default=60.0, metavar="S", dest="map_bucket",
+                   help="seconds per day-map column (default 60)")
+    g = p.add_mutually_exclusive_group()
+    g.add_argument("--by-day", action="store_true", default=None, dest="by_day",
+                   help="one panel per calendar day, x aligned on hour of day")
+    g.add_argument("--single-panel", action="store_false", dest="by_day",
+                   help="one long panel on absolute wall clock, whatever the day span")
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = _Parser(
         prog="audioanalyzer",
@@ -78,6 +96,14 @@ def build_parser() -> argparse.ArgumentParser:
                    help="files to analyse in parallel; 0 = auto (min of cores/2 and free RAM/260MB)")
     s.add_argument("--fail-on", type=float, default=None, dest="fail_on",
                    help="exit 3 if any detection's confidence reaches this value (FR-8.4)")
+    _add_map_args(s)
+
+    m = sub.add_parser("daymap",
+                       help="draw the day map from an EXISTING scan (no audio, no re-analysis)")
+    m.add_argument("artifact", type=Path, help="a previous run's scan.json (preferred) or CSV")
+    m.add_argument("-o", "--out", type=Path, default=Path("daymap.svg"))
+    m.add_argument("--html", type=Path, default=None, help="also wrap the SVG in a page")
+    _add_map_args(m)
 
     v = sub.add_parser("version", help="print version")
     v.add_argument("--json", action="store_true")
@@ -416,6 +442,41 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "doctor":
         return _doctor(list(args.files), args.json)
 
+    if args.command == "daymap":
+        from .daymap import build_day_map, load_artifact
+        try:
+            dets, cov, cfg = load_artifact(args.artifact)
+        except (OSError, ValueError, KeyError) as exc:
+            print(f"error: cannot read {args.artifact}: {exc}", file=sys.stderr)
+            return 2
+        if not dets:
+            print(f"error: {args.artifact} contains no detections", file=sys.stderr)
+            return 1
+        n = sum(1 for d in dets if d.t_start_wall)
+        days = sorted({d.t_start_wall[:10] for d in dets if d.t_start_wall})
+        by_day_eff = args.by_day if args.by_day is not None else len(days) > 1
+        svg = build_day_map(dets, cov, cfg, standalone=True, lanes=args.lanes,
+                            lane_h=args.lane_h, bucket_s=args.map_bucket, by_day=args.by_day)
+        out = args.out
+        out = out / "daymap.svg" if out.is_dir() or str(out).endswith("/") else out
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(svg, encoding="utf-8")
+        print(f"wrote {out} — {n} dated detection(s) over {len(days)} day(s) "
+              f"[{', '.join(days[:3])}{' …' if len(days) > 3 else ''}]")
+        print(f"  layout: {'one panel per day, x = hour of day' if by_day_eff else 'single panel on wall clock'}"
+              f", {args.lanes} lane(s) × {args.lane_h:g} px, {args.map_bucket:g} s columns")
+        if not cov:
+            print("  note: a CSV carries no coverage ledger, so unrecorded intervals are not "
+                  "hatched here — point this at the scan.json for the faithful map")
+        if args.html:
+            page = args.html
+            page.parent.mkdir(parents=True, exist_ok=True)
+            page.write_text("<!doctype html><meta charset='utf-8'><title>day map</title>"
+                            "<body style='background:#0d1013;margin:16px'>" + svg + "</body>",
+                            encoding="utf-8")
+            print(f"wrote {page}")
+        return 0
+
     if args.command == "profile":
         cfg = Config()
         if getattr(args, "mode", None):
@@ -623,8 +684,12 @@ def main(argv: list[str] | None = None) -> int:
         out = out / "report.html" if out.is_dir() or str(args.report).endswith("/") else out
         media = {s["media"]["path"]: s["media"] for s in summaries}
         try:
+            from .daymap import build_day_map
+            map_svg = build_day_map(all_dets, coverage, cfg,
+                                    lanes=args.lanes, lane_h=args.lane_h,
+                                    bucket_s=args.map_bucket, by_day=args.by_day)
             p = build_report([str(x) for x in paths], all_dets, sources, coverage, cfg, out,
-                             media=media, timeline=timeline)
+                             media=media, timeline=timeline, day_map=map_svg)
         except Exception as exc:
             print(f"error: report generation failed after the analysis ({type(exc).__name__}: "
                   f"{exc}); the CSV and JSON are complete and valid", file=sys.stderr)
@@ -632,9 +697,10 @@ def main(argv: list[str] | None = None) -> int:
         if not args.quiet:
             print(f"wrote {p} ({p.stat().st_size / 1e6:.2f} MB, self-contained)")
         try:
-            from .daymap import build_day_map
             svg = p.parent / "daymap.svg"
-            svg.write_text(build_day_map(all_dets, coverage, cfg, standalone=True),
+            svg.write_text(build_day_map(all_dets, coverage, cfg, standalone=True,
+                                         lanes=args.lanes, lane_h=args.lane_h,
+                                         bucket_s=args.map_bucket, by_day=args.by_day),
                            encoding="utf-8")
             if not args.quiet:
                 print(f"wrote {svg} (standalone, zoomable — a PNG of a day puts 96 s in a pixel)")

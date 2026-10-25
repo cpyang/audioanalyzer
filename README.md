@@ -150,15 +150,40 @@ Design constraints worth knowing, since they are the difference between a tool a
 
 ### Day map
 
-`--report` also writes `out/daymap.svg`: time of day across the top, log-frequency lanes down the
-side, each minute-and-band cell coloured by the loudest dB-over-floor seen there. Unrecorded
-intervals are hatched, and the top tone tracks are labelled with frequency, level and duty.
+`scan --report` writes `out/daymap.svg` and embeds it in the report. It is a **marks** diagram, not
+a spectrogram, for two measured reasons: 95.8 % of a day spectrogram's image variance is the noise
+floor's own low-to-high tilt (microphone response, not the site), and at day scale a pixel is 96
+seconds wide — the strongest tone of the reference day lasts 15.26 s, so it would occupy 0.16 of a
+pixel and read as "nothing happened". A mark at a time position is scale-free.
 
-This is deliberately not a day-long spectrogram. At 900 columns a 24-hour recording gives **96
-seconds per pixel**, and the strongest tone finding of the reference day lasts **15.26 seconds** —
-a sixth of a pixel, invisible no matter how the colour scale is set. A mark at a time position is
-scale-free, so a 15-second event reads as clearly as a 40-minute one. Spectrograms still do the job
-they are good at: ±30 s evidence crops beside each detection.
+Three layout controls:
+
+| flag | effect |
+|---|---|
+| `--lane-h PX` | pixels per frequency lane. Default 18 (was 13); **24–30** if you are reading bands rather than scanning shape |
+| `--lanes N` | frequency lanes (geometric 20 Hz → 7.6 kHz). More lanes = finer frequency detail, taller map |
+| `--map-bucket S` | seconds per column (default 60) |
+| `--by-day` / `--single-panel` | one panel per calendar day with **x aligned on hour of day**, or one long wall-clock panel. Auto-selects `--by-day` when the data spans more than one day |
+
+The day-aligned layout exists for multi-night surveys. Stacking one panel per day on a shared hour
+ruler turns "is Tuesday different?" into a shape comparison in the same column: on a synthetic
+three-day test (day B silent 02:00–04:00, day C drifted +90 min), day B's 02–03 h cells drop to
+2 and 0 against day A's 105 and 146, and day C's busiest hour moves 18:00 → 20:00 — visible without
+having to remember where yesterday's evening sat.
+
+### Redrawing without re-analysing
+
+The map is computed from detections, not audio, so it can be rebuilt from a previous run's
+artifact. This is the difference between iterating on layout for 0.8 s and for 4½ minutes:
+
+```
+audioanalyzer daymap out/scan.json -o out/daymap.svg --by-day --lane-h 24
+```
+
+Point it at the **JSON**: it carries the coverage ledger (so unrecorded intervals stay hatched),
+the config that run used, and `z_peak`, which is what colours an impact. A CSV works but has none of
+those, and the command says so. Spectrograms still do the job they are good at: ±30 s evidence crops
+beside each detection.
 
 `report.html` is self-contained (figures embedded as base64): sortable table, per-detection
 spectrogram + waveform crops, coverage ledger stating what was never recorded.
@@ -182,7 +207,7 @@ every output, because a report you cannot reproduce is a rumour.
 ## Tests
 
 ```bash
-.venv/bin/python -m pytest tests -q        # 121 tests, ~90 s, no audio files needed
+.venv/bin/python -m pytest tests -q        # 130 tests, ~90 s, no audio files needed
 ```
 
 Ground truth is injected and recovered: a tone added at 300–900 s comes back dated `0:05:00` for

@@ -532,6 +532,15 @@ Whole-day throughput and memory (NFR-4/5): **see §2.3** for the census and tota
   rewritten by every run (opt-in `--append` to accumulate), which also repairs the index contract —
   `promote` indexes file positions while the printed table numbers come from the current run.
   **121 tests green.**
+* **Day-map layout + artifact-only rendering (v0.5.0, 2026-10-24):** three asks, one of them a
+  latent bug. `daymap` now draws **one panel per calendar day on a shared hour-of-day ruler**
+  (auto-selected above one day, `--by-day`/`--single-panel` to choose), so a day-over-day change is
+  a shape difference in the same column; `--lane-h`/`--lanes`/`--map-bucket` make the frequency
+  axis readable instead of 13 px tall; and `audioanalyzer daymap out/scan.json` re-renders from a
+  previous run's artifact in **0.8 s instead of 4½ min**, which is what makes layout iteration
+  actual iteration. Fixing the multi-day test exposed an R10 hole: a blackout **later than the last
+  detection** was drawn past the canvas edge and effectively deleted — the old test passed only
+  because it asserted the string was present. The span now includes gaps. **130 tests green.**
 * **M5 (later)** — cross-night trending, optional ML classifier, capture-side integration.
   Before any of that: the **listening calibration** (R13) and a **multi-night corpus** (FR-7.2's
   day-of-week claim is not testable on one day), because the numbers in §2.3 are machine-truth
