@@ -230,8 +230,23 @@ audioanalyzer scan /data/night-02/ --json out/scan-2026-10-24.json --incremental
 matched by filename and frame count. **There is no state file**: the artifacts are the memory. A
 separate ledger was rejected deliberately, because ledgers rot when files are moved, restored or
 re-encoded, and a stale skip is a silent false negative — while an artifact that failed to record a
-file is simply an artifact that is not there, which is checkable. One JSON per range, never an
-append to a growing one: a bad run gets deleted, not unpicked out of a singleton.
+file is simply an artifact that is not there, which is checkable.
+
+Two rules make that actually work, and the first release got both wrong (symptom: `--incremental`
+rescanned all 77 files every time):
+
+* **The file named by `--json` is part of the history.** It must be read *before* it is written.
+  Excluding it as "this run's own output" meant the natural `--json out/scan.json` layout could never
+  find prior coverage at all.
+* **A range run never overwrites the artifact it learned from.** Writing only the new subset to
+  `out/scan.json` would delete the record of everything already covered, so the next run would
+  re-add it all to a doubled census. Instead each incremental run writes a sibling named by its
+  covered span — `out/scan-20261024T0000-20261024T0100.json` — and the command prints the `report`
+  line that merges them. `--csv`/`--report` follow the same suffix so a partial run never lands under
+  a name that implies completeness.
+
+One JSON per range, never an append to a growing one: a bad run gets deleted, not unpicked out of a
+singleton.
 
 `report.html` is self-contained (figures embedded as base64): sortable table, per-detection
 spectrogram + waveform crops, coverage ledger stating what was never recorded.

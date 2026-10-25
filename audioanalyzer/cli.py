@@ -44,6 +44,16 @@ class _Parser(argparse.ArgumentParser):
         self.exit(1, f"{self.prog}: error: {message}\n")
 
 
+def _range_tag(paths: list[Path]) -> str:
+    """Short covered-span tag for an incremental artifact name, from the capture times."""
+    from .ingest import capture_start_from_name
+    stamps = sorted(s for s in (capture_start_from_name(p) for p in paths) if s is not None)
+    if not stamps:
+        return "unrangeable"
+    a, b = stamps[0], stamps[-1]
+    return f"{a:%Y%m%dT%H%M}-{b:%Y%m%dT%H%M}"
+
+
 def _add_map_args(p: argparse.ArgumentParser) -> None:
     """Day-map layout knobs, shared by `scan` (which draws it after analysing) and `daymap`
     (which draws it from an existing artifact)."""
@@ -747,21 +757,30 @@ def main(argv: list[str] | None = None) -> int:
         # FR-8.8: the memory is the artifacts, not a ledger. (basename, frames) is the file's
         # identity — a re-encode changes frames, and a restored-or-renamed file either matches a
         # recorded artifact or is new; there is no stale entry to skip it wrongly.
+        #
+        # The file named by --json IS part of that history, and must be read BEFORE it is written:
+        # excluding it (as the first version did) meant the common `--json out/scan.json` layout
+        # could never find prior coverage and rescanned everything, forever. Writing the new subset
+        # back to that same path would be the other half of the trap — it would delete the record of
+        # every file already covered, so the next run would re-add them all to a doubled census.
+        # So: history is read from the target and its siblings, and this run writes a NEW per-range
+        # file next to them.
         from .artifact import load_run, scanned_set
-        here = Path(args.json).resolve() if args.json else None
         out_dir = Path(args.json).parent if args.json else Path(".")
+        target = Path(args.json) if args.json else None
         prior: list = []
-        for cand in sorted(out_dir.glob("*.json")):
-            if here is not None and cand.resolve() == here:
-                continue                     # do not treat this run's own output as prior history
+        candidates = sorted(out_dir.glob("*.json"))
+        if target is not None and target not in candidates:
+            candidates.append(target)
+        for cand in candidates:
             try:
                 prior.append(load_run(cand))
             except (OSError, ValueError):
-                continue                       # configs, package.json, anything else in that dir
+                continue                       # configs, package.json, half-written files
         covered = scanned_set(prior)
         if not covered:
-            print("incremental: no prior artifacts found next to the output, scanning everything",
-                  file=sys.stderr)
+            print("incremental: no prior artifact found "
+                  f"(looked in {out_dir}), scanning everything", file=sys.stderr)
         keep, skipped = [], 0
         for path in paths:
             try:
@@ -775,11 +794,32 @@ def main(argv: list[str] | None = None) -> int:
         if not args.quiet and skipped:
             print(f"incremental: skipping {skipped} of {len(paths)} file(s) already covered by "
                   f"{len(prior)} prior artifact(s) in {out_dir}")
-        paths = keep
-        if not paths:
+        if not keep:
             if not args.quiet:
-                print("incremental: nothing new to analyse")
+                print("incremental: nothing new to analyse; no artifact written")
             return 0
+        paths = keep
+        if target is not None and len(prior) and target.exists():
+            # redirect this run's output so the history it just read survives
+            rng = _range_tag(paths)
+            newname = target.parent / f"{target.stem}-{rng}{target.suffix}"
+            if not args.quiet:
+                print(f"incremental: writing this range to {newname} — {target} keeps the "
+                      f"previous coverage, so the two together stay correct")
+                print(f"             report: audioanalyzer report {target} {newname} -o report.html")
+            args.json = newname
+            # the same argument applies to the sibling outputs: a report or CSV written under the old
+            # name would describe only this range while looking like it described everything
+            for attr in ("csv", "report"):
+                old = getattr(args, attr, None)
+                if old is None:
+                    continue
+                p = Path(old)
+                if attr == "report" and (p.is_dir() or str(old).endswith("/") or not p.suffix):
+                    (p / f"report-{rng}.html").parent.mkdir(parents=True, exist_ok=True)
+                    setattr(args, attr, p / f"report-{rng}.html")
+                else:
+                    setattr(args, attr, p.parent / f"{p.stem}-{rng}{p.suffix}")
 
     if args.report:                                   # FR-8.4: fail before the expensive work
         rc = _require_optional("matplotlib", "report", "--report")

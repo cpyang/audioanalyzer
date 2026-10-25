@@ -429,6 +429,15 @@ there. Output is a NEW file per range (`out/scan-20261026.json`), never an appen
 per-range files stay diffable, re-mergeable and safe to copy off the machine, and a bad run is
 deleted rather than unpicked out of a singleton. Naming is by covered span, from `capture_start` of
 the first and last file, so the filename states what it covers.
+**Two corollaries, both learned from a field report (2026-10-25) where `--incremental` rescanned
+everything, every time.** (a) The file named by `--json` IS part of that memory and must be read
+BEFORE it is written — excluding it as "this run's own output" left the natural
+`--json out/scan.json` layout permanently unable to find history. (b) A range run must never
+overwrite the artifact it just learned from: writing the new subset alone would erase the coverage
+record and double the next census. So the target keeps its contents and this run's output goes to a
+sibling named by its span, with `--csv`/`--report` following the same suffix — a partial run must not
+land under a name implying completeness. The command prints both the new path and the `report` line
+that merges them.
 
 ### FR-9 CLI (surface, names may change)
 ```

@@ -176,7 +176,55 @@ def test_incremental_with_no_history_says_so(tmp_path, run, capsys):
     rc, out, err = run(["scan", str(d), "--json", str(tmp_path / "only.json"), "--incremental",
                         "--quiet"])
     assert rc == 0
-    assert "no prior artifacts" in err
+    assert "no prior artifact" in err
+
+
+def test_incremental_works_with_the_natural_single_target(tmp_path, run):
+    """The reported bug, reproduced exactly: `scan DIR --json out/scan.json --incremental` scanned
+    everything every time, because the search for prior history excluded out/scan.json itself."""
+    d = tmp_path / "bpim"
+    d.mkdir()
+    for hh in (0, 1):
+        x = add_tone(rumble(FS, 26.0, seed=hh), FS, 880.0 + hh, -45.0, 0.0, 26.0)
+        sf.write(d / f"20261023T{hh:02d}0002.flac", x, FS, subtype="PCM_16")
+    out = tmp_path / "out"
+    out.mkdir()
+    j = out / "scan.json"
+    rc, _, err = run(["scan", str(d), "--json", str(j), "--incremental"])
+    assert rc == 0, err
+    assert "no prior artifact" in err, "first run has no history and must say so"
+    assert j.exists()
+    # a second file joins the SAME directory; rerun the identical command
+    x = add_tone(rumble(FS, 26.0, seed=9), FS, 1440.0, -45.0, 0.0, 26.0)
+    sf.write(d / "20261023T020002.flac", x, FS, subtype="PCM_16")
+    rc, outtxt, err = run(["scan", str(d), "--json", str(j), "--incremental"])
+    assert rc == 0, err
+    assert "skipping 2 of 3" in outtxt, f"incremental rescanned: {outtxt!r}"
+    # history survives: the original file still covers 2, the new artifact covers just the 3rd
+    assert len(load_run(j).dets) > 0 and {b for b, _ in load_run(j).basename_frames} == {
+        "20261023T000002.flac", "20261023T010002.flac"}
+    newf = [p for p in out.glob("scan-*.json")]
+    assert len(newf) == 1, f"expected one new range artifact, got {[p.name for p in newf]}"
+    assert {b for b, _ in load_run(newf[0]).basename_frames} == {"20261023T020002.flac"}
+    # and the two together are the whole picture, with nothing lost or doubled
+    m = merge_runs([load_run(j), load_run(newf[0])])
+    allf = load_run(j).dets + load_run(newf[0]).dets
+    assert len(m["dets"]) == len(allf) == len({identity(a, None) for a in allf})
+
+
+def test_incremental_reidentifies_by_frames_not_name(tmp_path, run):
+    """A re-encoded file with the same name is a DIFFERENT recording and must be re-analysed."""
+    d = tmp_path / "re"
+    d.mkdir()
+    p = d / "20261023T050002.flac"
+    sf.write(p, add_tone(rumble(FS, 26.0, seed=3), FS, 700.0, -45.0, 0.0, 26.0), FS, subtype="PCM_16")
+    out = tmp_path / "o"
+    out.mkdir()
+    j = out / "scan.json"
+    assert run(["scan", str(d), "--json", str(j), "--incremental", "--quiet"])[0] == 0
+    sf.write(p, add_tone(rumble(FS, 52.0, seed=3), FS, 700.0, -45.0, 0.0, 52.0), FS, subtype="PCM_16")
+    rc, outtxt, _ = run(["scan", str(d), "--json", str(j), "--incremental"])
+    assert "skipping" not in outtxt, "a changed recording was skipped as if unchanged"
 
 
 def test_a_non_artifact_is_rejected_clearly(tmp_path, run):
