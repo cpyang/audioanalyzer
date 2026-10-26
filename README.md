@@ -225,6 +225,44 @@ shipped 12 cards with 12 images, all waveforms. No test could have caught it: th
 checked the *absence* of external URLs, which rewards producing fewer images. There is now a test
 that a card contains two images, and one that a −45 dBFS sine reads −45 dB in the crop.
 
+### Merging and splitting artifacts
+
+The artifacts are data, so they can be rearranged without touching the audio:
+
+```
+audioanalyzer merge out/night-01.json out/night-02.json -o out/two-nights.json
+audioanalyzer split out/scan.json --by hour  --dir out/hourly    # scan-20261023T07.json ...
+audioanalyzer split out/scan.json --by day   --dir out/daily     # scan-20261023.json ...
+audioanalyzer split out/scan.json --by month --dir out/monthly   # scan-2026-10.json ...
+```
+
+`merge` takes 2+ artifacts (or 1, to normalise one) and writes a new one; `split` writes one file per
+bucket, named `<prefix>-<bucket>.json` so the filenames sort chronologically. Both refuse to
+overwrite an existing artifact unless you pass `--force` — these files *are* `--incremental`'s
+memory, and clobbering one quietly rewinds what you have already scanned. A split is recording-atomic:
+a detection always stays in the file it was measured from, and if a recording straddles a boundary its
+bucket says so rather than duplicating the finding in two parts (0 of 5,023 rows in the reference day
+straddle a day boundary; hourly chunks make hour-splits a clean 1:1).
+
+Re-running the day through `split --by hour | merge` reproduces it exactly: 5,023 detections, same
+identity set, same `coverage.audio_s` (86,132.309 s), and no lost `analysis` or `quality_flags`.
+Getting there surfaced three defects that were already in the code, each invisible to the path that
+hid it:
+
+* **The JSON rows were serialized before the annotation passes ran.** `nearest`, `label`,
+  `source_id`, `timeline_entry` are set after the per-file blocks were frozen, so an artifact recorded
+  a *pre-annotation* view of its own detections, and every artifact-derived report re-deriving from it
+  disagreed with the CSV of the same run.
+* **The loader dropped any row key it did not recognise.** `signature` and `nearest` are neither
+  dataclass fields nor in the whitelist, so they fell off the end of a branch chain: an
+  artifact-derived report silently lost each impact's waveform signature. Unrecognised keys now go to
+  `extra`, which makes load → save → load a fixed point.
+* **Source clustering depended on input order.** It seeds greedily from `pool[0]`, and the order a scan
+  assembles detections in is not the order they reload from a file — measured on the reference day,
+  4 sources recorded against 3 re-derived, including one bogus 65.4 Hz / 555 Hz "temporal" pair that
+  existed on only one of the two paths. The pool is now canonically ordered, so all derived views are
+  a function of the findings.
+
 ### Incremental scanning
 
 ```
@@ -275,7 +313,7 @@ every output, because a report you cannot reproduce is a rumour.
 ## Tests
 
 ```bash
-.venv/bin/python -m pytest tests -q        # 160 tests, ~3 min, no audio files needed
+.venv/bin/python -m pytest tests -q        # 178 tests, ~4 min, no audio files needed
 ```
 
 Ground truth is injected and recovered: a tone added at 300–900 s comes back dated `0:05:00` for

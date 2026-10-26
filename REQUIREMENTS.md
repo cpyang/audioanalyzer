@@ -1,6 +1,6 @@
 # Audio Anomaly Analyser — Requirements
 
-Status: v0.7 implemented (160 tests green) — M0–M6, artifact-first outputs in FR-8.2c/8.7/8.8
+Status: v0.8 implemented (178 tests green) — M0–M6, artifact-first outputs in FR-8.2c/8.7/8.8/8.9
 Date: 2026-10-25
 Owner: (unassigned)
 Reference corpus: `/home/cpyang/src/audioanalyzer/20261023T070002.flac`
@@ -469,6 +469,10 @@ that can be shared, compared, or report-built per day.
   reads (FR-8.8).
 * **Round-trip invariants, tested**: `merge(split(X, hour))` reproduces X's detection set, its file
   blocks, and its coverage span; `split(merge(A,B), day)` groups exactly the union of their files.
+* **Every derived view must be a function of the findings only** (NFR-6). Implementing this rule is
+  what exposed three pre-existing order- and path-dependencies: JSON rows serialized *before* the
+  annotation passes, a loader that dropped unrecognised row keys, and greedy source clustering seeded
+  from `pool[0]`. See R18 — merge/split did not introduce these, they made them observable.
 
 ### FR-9 CLI (surface, names may change)
 ```
@@ -735,6 +739,8 @@ Still open (do not block M1 on these):
 | R17 | **An artifact loader can be lossy and still pass every test.** `load_run` (FR-8.7) reconstructs `media` + `detections` and dropped each file's `analysis` and `quality_flags` block — invisible while the only consumer was `report`, but `merge`/`split` (FR-8.9) write artifacts, so using it there would quietly discard the data-quality record (DC offset, clipping, silence) | `Run` carries the raw per-file blocks verbatim; a test asserts a merged/split artifact retains every input's `quality_flags` and `analysis`, and the round-trip invariants compare file blocks, not just detection counts |
 
 ---
+
+| R18 | **A derived view can depend on the code path that built it, not on the findings.** Three instances, all found by the merge/split round-trip rather than by the path that was wrong: rows serialized before annotation (so an artifact disagreed with the CSV of its own run); a loader with no fallthrough, so `signature`/`nearest` vanished on reload; greedy clustering seeded from `pool[0]`, so scan order and reload order yielded different source tables (4 vs 3, including a false 65.4/555 Hz pair) | Rows are serialized after all annotation passes; unrecognised row keys go to `extra`, making load→save→load a fixed point; the clustering pool is canonically ordered by (file, start, frequency). Tests: 8 shuffled orders give one table; a save/load round trip gives the same table as the in-memory run |
 
 ## 12. Appendix — probe evidence (reproducible)
 

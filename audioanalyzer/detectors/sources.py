@@ -17,6 +17,7 @@ from __future__ import annotations
 import hashlib
 import itertools
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import numpy as np
 
@@ -136,7 +137,16 @@ def group_sources(dets: list[Detection], cfg: Config) -> list[Source]:
     not a measurement), so feeding events in merged 1178 separate impacts into one "source" with
     1178 harmonics all at 61 Hz — which is exactly what the first whole-day run reported.
     """
-    pool = [d for d in dets if d.cls in ("A1", "A2")]
+    # Canonical pool order. Greedy clustering takes pool[0] as the first seed, so the source table
+    # used to depend on the order detections arrived in — and a run assembled in memory (per file,
+    # detector emission order) does not arrive in the same order as the same detections reloaded from
+    # an artifact (per file, time order). Measured on the reference day: 4 sources recorded by the
+    # scan, 3 re-derived from the file that scan had just written, including one bogus 65.4/554.9
+    # "temporal" pair present on only one of the two paths. Sorting by (file, start, frequency) is a
+    # fixed point of both, which is what NFR-6 asks of any derived view.
+    pool = sorted((d for d in dets if d.cls in ("A1", "A2")),
+                  key=lambda d: (Path(str(d.file)).name, round(float(d.t_start_s), 6),
+                                 round(float(d.freq_hz), 4)))
     for d in dets:
         if d.cls not in ("A1", "A2"):
             d.source_id, d.source_f0_hz, d.n_harmonics = "", 0.0, 0

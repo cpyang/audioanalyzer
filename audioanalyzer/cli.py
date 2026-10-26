@@ -25,6 +25,8 @@ import numpy as np
 import soundfile as sf
 
 from . import __version__
+from .artifact import (artifact_doc, load_run, merge_runs, scanned_set, split_plan,
+                       write_artifact)
 from .config import Config, recall_preset
 from .corpus import build_timeline
 from .detectors.sources import annotate_neighbours, group_sources
@@ -144,6 +146,22 @@ def build_parser() -> argparse.ArgumentParser:
     m.add_argument("-o", "--out", type=Path, default=Path("daymap.svg"))
     m.add_argument("--html", type=Path, default=None, help="also wrap the SVG in a page")
     _add_map_args(m)
+
+    mg = sub.add_parser("merge", help="merge 2+ scan JSONs into ONE new artifact (no audio needed)")
+    mg.add_argument("artifacts", nargs="+", type=Path, metavar="SCAN.json")
+    mg.add_argument("-o", "--out", type=Path, required=True)
+    mg.add_argument("--allow-mixed", action="store_true", dest="allow_mixed",
+                    help="merge despite differing thresholds, and record the fact")
+    mg.add_argument("--force", action="store_true", help="overwrite --out if it already exists")
+    mg.add_argument("--quiet", action="store_true")
+
+    sp = sub.add_parser("split", help="split one scan JSON into hour/day/month artifacts")
+    sp.add_argument("artifact", type=Path, metavar="SCAN.json")
+    sp.add_argument("--by", choices=("hour", "day", "month"), default="day")
+    sp.add_argument("--dir", type=Path, default=None, help="output directory (default: beside input)")
+    sp.add_argument("--prefix", default="scan", help="part files are <dir>/<prefix>-<bucket>.json")
+    sp.add_argument("--force", action="store_true", help="overwrite existing parts")
+    sp.add_argument("--quiet", action="store_true")
 
     v = sub.add_parser("version", help="print version")
     v.add_argument("--json", action="store_true")
@@ -345,7 +363,8 @@ def _assemble(results, *, quiet: bool, stream: bool):
         all_dets += r["detections"]
         infos.append(r["media"])
         summaries.append({"media": r["media"].to_dict(), "quality_flags": r["flags"],
-                          "analysis": r["analysis"], "detections": r["json_dets"]})
+                          "analysis": r["analysis"], "detections": r["json_dets"],
+                          "_objs": r["detections"]})   # live objects; serialized after annotation
         if not quiet and stream:
             print(r["text"])
     if not stream and not quiet:
@@ -480,11 +499,10 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "report":
-        # Only load_run/merge_runs are imported here. build_timeline, group_sources, coverage_ledger,
-        # load_known, label and recurrence are already module-level imports, and re-importing them
-        # inside a branch makes them LOCAL to main() for every branch — which turned `scan` into an
-        # UnboundLocalError the first time this command was added. Import a name in one place.
-        from .artifact import load_run, merge_runs
+        # build_timeline, group_sources, coverage_ledger, load_known, label and recurrence are
+        # module-level imports, and re-importing them inside a branch makes them LOCAL to main() for
+        # every branch — which turned `scan` into an UnboundLocalError the first time this command was
+        # added. Import a name in one place.
         try:
             runs = [load_run(p) for p in args.artifacts]
         except (OSError, ValueError) as exc:
@@ -537,6 +555,78 @@ def main(argv: list[str] | None = None) -> int:
             if st["gating_diff"]:
                 print(f"  mixed thresholds merged (--allow-mixed): {', '.join(st['gating_diff'])}")
             print(f"  evidence figures: {'from ' + str(fdir) if fdir.exists() else 'none cached — cards will say so'}")
+        return 0
+
+    if args.command == "merge":
+        try:
+            runs = [load_run(p) for p in args.artifacts]
+        except (OSError, ValueError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        try:
+            merged = merge_runs(runs, allow_mixed=args.allow_mixed)
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        try:
+            doc = artifact_doc(runs, merged["dets"], merged["infos"], merged["cfg"],
+                               provenance=merged["provenance"])
+            p = write_artifact(doc, args.out, force=args.force)
+        except (OSError, ValueError, FileExistsError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        if not args.quiet:
+            st = merged["stats"]
+            print(f"wrote {p} — {st['unique']:,} detection(s) from {st['runs']} artifact(s), "
+                  f"{len(merged['infos'])} recording(s)")
+            if st["conflicts"]:
+                print(f"  note: {st['conflicts']} duplicate(s) disagreed on a measured field "
+                      f"(kept the first)")
+            if st["gating_diff"]:
+                print(f"  mixed thresholds merged (--allow-mixed): {', '.join(st['gating_diff'])}")
+            print("  this artifact is --incremental/report/daymap input; audio was not read")
+        return 0
+
+    if args.command == "split":
+        try:
+            run = load_run(args.artifact)
+        except (OSError, ValueError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        buckets, notes = split_plan(run, args.by)
+        out_dir = args.dir or Path(args.artifact).parent
+        by_base = {Path(i.path).name: i for i in run.infos}
+        written = []
+        for b in sorted(buckets):
+            dets = buckets[b]
+            infos = [by_base[Path(str(d.file)).name] for d in dets
+                     if Path(str(d.file)).name in by_base]
+            seen, uniq = set(), []
+            for i in infos:
+                if i.path in seen:
+                    continue
+                seen.add(i.path)
+                uniq.append(i)
+            part = out_dir / f"{args.prefix}-{b}.json"
+            try:
+                written.append(write_artifact(artifact_doc([run], dets, uniq, run.cfg), part,
+                                              force=args.force))
+            except FileExistsError as exc:
+                print(f"error: {exc}", file=sys.stderr)
+                return 1
+        if not args.quiet:
+            total = sum(len(v) for v in buckets.values())
+            print(f"split {len(run.dets):,} detection(s) over {len(run.infos)} recording(s) "
+                  f"by {args.by} -> {len(written)} file(s), {total:,} detection(s) written")
+            for pth in written:
+                d = json.loads(pth.read_text())
+                print(f"  {pth.name}: {sum(len(f['detections']) for f in d['files']):,} rows, "
+                      f"{len(d['files'])} recording(s)")
+            for n in notes:
+                print(f"  note: {n}")
+            if total != len(run.dets):
+                print(f"  MISMATCH: {len(run.dets) - total} detection(s) not written "
+                      f"(this is a bug, not a filter)")
         return 0
 
     if args.command == "doctor":
@@ -765,7 +855,6 @@ def main(argv: list[str] | None = None) -> int:
         # every file already covered, so the next run would re-add them all to a doubled census.
         # So: history is read from the target and its siblings, and this run writes a NEW per-range
         # file next to them.
-        from .artifact import load_run, scanned_set
         out_dir = Path(args.json).parent if args.json else Path(".")
         target = Path(args.json) if args.json else None
         prior: list = []
@@ -875,6 +964,13 @@ def main(argv: list[str] | None = None) -> int:
         if not args.quiet:
             print(f"wrote {args.csv} ({n} rows)")
     if args.json:
+        # Serialize the per-file rows HERE, after every annotation pass has run. `json_dets` was
+        # built in the worker, where a detection cannot yet know its corpus-relative fields (nn_*,
+        # label, timeline_entry, source_id) — writing that snapshot made the artifact disagree with
+        # the CSV of the same run, and made every artifact-derived view (report, merge, split,
+        # daymap) re-derive a different source table than the scan had recorded.
+        for s in summaries:
+            s["detections"] = detections_json(s.pop("_objs"))
         write_json({"tool": tool_header(cfg), "coverage": coverage,
                     "recurrence": rec, "timeline": timeline,
                     "sources": [s.to_dict() for s in sources], "files": summaries}, args.json)

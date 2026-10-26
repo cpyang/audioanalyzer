@@ -130,6 +130,13 @@ def _from_json(r: dict) -> Detection:
             d.cls = v
         elif hasattr(d, k):
             setattr(d, k, v)
+        else:
+            # Not a field, not a known extra: still something the run measured. Falling off the end of
+            # this chain used to discard it silently — `nearest` and `signature` were lost this way, so
+            # an artifact-derived report dropped an impact's signature while the scan's own report
+            # kept it. Anything unrecognised goes to `extra`; detections_json flattens those back out,
+            # which makes load -> save -> load a fixed point.
+            d.extra[k] = v
     return d
 
 
