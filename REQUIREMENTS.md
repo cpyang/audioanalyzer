@@ -3,7 +3,7 @@
 Status: v0.7 implemented (160 tests green) — M0–M6, artifact-first outputs in FR-8.2c/8.7/8.8
 Date: 2026-10-25
 Owner: (unassigned)
-Reference corpus: `/home/cpyang/Audio/20261023T070002.flac`
+Reference corpus: `/home/cpyang/src/audioanalyzer/20261023T070002.flac`
 Related: `@file:20261023T070002.flac`
 
 ---
@@ -467,7 +467,7 @@ audioanalyzer version / config --dump
 |---|---|---|
 | NFR-1 | Language / runtime | Pure Python, ≥3.10. **3.12 chosen** for wheel breadth (host has 3.12 and 3.14; `uv` at `~/.local/bin/uv`) |
 | NFR-2 | Dependencies | `numpy`, `scipy`, `soundfile`, `matplotlib` (report only), `tomli`/stdlib TOML. **No `librosa`** (drags numba/llvmlite; no MIR needed). All four verified to have cp312 manylinux wheels (numpy 2.5.4, scipy 1.18.1, matplotlib 3.11.2; soundfile 0.14.0 ships `py2.py3-none-manylinux_2_28_x86_64` with bundled libsndfile). **An optional dep must be declared as an extra AND checked before any analysis starts** — not imported at the end of a long run (§11 R14) |
-| NFR-3 | Install | `uv venv --python 3.12` in `/home/cpyang/Audio/.venv`, `uv pip install -e '.[report]'` — offline-reproducible via `requirements.lock`. No conda, no system-site-packages mutation |
+| NFR-3 | Install | `uv venv --python 3.12` in `/home/cpyang/src/audioanalyzer/.venv`, `uv pip install -e '.[report]'` — offline-reproducible via `requirements.lock`. No conda, no system-site-packages mutation |
 | NFR-4 | Throughput | ≤ 45 s wall per 60-min/16 kHz mono file in standard mode; ≤ 4 min in `hr` mode. **Measured 14.9 s wall per file but at ~205 % CPU** (FFT/BLAS threads) — so the honest cost is ~31 s of CPU, not 1 core, and a worker budget must divide cores by 2 rather than assume 1. **Whole 24-chunk day: 8 m 04 s serial → 4 m 30 s in parallel** (`-J` auto = 6 workers here), 225 MB peak. Directory scans run **files in parallel by default**, sized `min(cores/2, MemAvailable/260 MB)`. M0 measured: ingest pass = 1.35 s wall, 43 MB RSS (≈2650× realtime) |
 | NFR-5 | Memory | **< 400 MB peak RSS** per file (full STFT of the reference file would be 111 600 frames × 1025 bins ≈ 460 MB in float32 → must be blocked, per FR-1.2/3.5). **Measured 210 MB per worker** ⇒ `jobs × 210 MB` must fit `MemAvailable`; the auto-sizer treats that as a bound, not advice |
 | NFR-6 | Determinism | Same input + config ⇒ byte-identical CSV. No RNG; sort by (t_start, freq). **Holds between `-J 1` and `-J N`**: results are reassembled in input order, never completion order (`tests/test_jobs.py`) |
@@ -514,7 +514,7 @@ Whole-day throughput and memory (NFR-4/5): **see §2.3** for the census and tota
 ## 8. Deliverables & layout
 
 ```
-/home/cpyang/Audio/
+/home/cpyang/src/audioanalyzer/
   REQUIREMENTS.md            this document
   README.md                  quick start + worked examples
   .venv/                     uv-managed, python 3.12  (created in M0)
@@ -706,7 +706,7 @@ Still open (do not block M1 on these):
 
 ```bash
 export PATH=/home/cpyang/.hermes/tools/ffmpeg-9.0.1-linux-x64/bin:$PATH
-cd /home/cpyang/Audio
+cd /home/cpyang/src/audioanalyzer
 
 ffprobe -v error -show_format -show_streams -of json 20261023T070002.flac
 #  flac, s16, 16000 Hz, 1 ch, duration 3573.333312, size 45963274, tag Comment="Processed by SoX"

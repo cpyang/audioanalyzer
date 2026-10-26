@@ -7,10 +7,13 @@ required by the analysis — only by the figures, which FR-8.2c caches at scan t
 
 The two rules that keep a merge honest:
 
-* **Identity is (basename, frames, key()), never the stored path.** `Detection.file` holds the path
-  exactly as typed, so scanning `~/Audio` and then `./` describes the same recording under two
-  strings. Path-keyed dedupe would double every detection in the merged census, the timeline and the
-  recurrence table — and the report would still look internally consistent.
+* **Identity is (basename, frames, class, frequency, start time), never the stored path.**
+  `Detection.file` holds the path exactly as typed, so scanning `~/src/audioanalyzer` and then `./`
+  describes the same recording under two strings. Path-keyed dedupe would double every detection in
+  the merged census, the timeline and the recurrence table — and the report would still look
+  internally consistent. A coarse key (for example one that buckets the start time to a minute) is
+  worse: it collides detections from a single run with each other, which cost 47 % of one census
+  before this was fixed.
 * **Corpus views are recomputed, never merged.** Two `sources` blocks each contain a feature that
   straddles their run boundary; concatenating them counts it twice and invents episodes. The merged
   detection set is the only input to the derived views.

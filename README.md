@@ -10,7 +10,7 @@ this tool does not use a loudness threshold).
 ## Install
 
 ```bash
-cd ~/Audio
+cd ~/src/audioanalyzer
 uv venv --python 3.12 .venv           # python 3.12: widest wheel coverage (doc §11 R9)
 .venv/bin/python -m pip install -e '.[report]'    # or: uv pip install -e '.[report]'
 .venv/bin/audioanalyzer version
@@ -195,9 +195,12 @@ audioanalyzer daymap out/scan.json -o out/daymap.svg --by-day
 Merging artifacts follows two rules, both because a report that looks internally consistent can
 still be wrong:
 
-* **Identity is (filename, frame count, detection key), never the stored path.** A path is kept
-  exactly as typed, so scanning `~/Audio` and `./` describes the same recording twice under two
-  strings — and the merged census, timeline and recurrence would all double without any symptom.
+* **Identity is (filename, frame count, class, frequency, start time), never the stored path and
+  never a minute-bucketed key.** A path is kept exactly as typed, so scanning `~/src/audioanalyzer`
+  and `./` describes the same recording twice under two strings — and the merged census, timeline and
+  recurrence would all double without any symptom. A coarse key is worse still: bucketing the start
+  time to a minute makes detections from a *single* run collide, and 47 % of one census disappeared
+  before it was fixed.
 * **Derived views are recomputed, never merged.** Two `sources` blocks each contain a feature that
   straddles their boundary; concatenating them counts it twice and invents episodes.
 
