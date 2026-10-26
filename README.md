@@ -11,7 +11,9 @@ this tool does not use a loudness threshold).
 
 ```bash
 cd ~/src/audioanalyzer
-uv venv --python 3.12 .venv           # python 3.12: widest wheel coverage (doc §11 R9)
+uv venv --python 3.12 --prompt noise .venv   # 3.12 = widest wheel coverage (§11 R9);
+#                                             --prompt sets the shell prefix; uv 0.5.9 otherwise
+#                                             bakes an empty prompt and bash falls back to ".venv"
 .venv/bin/python -m pip install -e '.[report]'    # or: uv pip install -e '.[report]'
 .venv/bin/audioanalyzer version
 ```
