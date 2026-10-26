@@ -439,6 +439,37 @@ sibling named by its span, with `--csv`/`--report` following the same suffix —
 land under a name implying completeness. The command prints both the new path and the `report` line
 that merges them.
 
+### FR-8.9 Artifact merge and split
+`audioanalyzer merge A.json B.json […] -o OUT.json` writes one artifact covering several runs;
+`audioanalyzer split IN.json --by hour|day|month [--dir DIR]` writes one artifact per bucket. Both
+exist so an artifact is a *composable* record rather than a terminal output: a week of nightly
+`--incremental` ranges merges into one report input, and a single long artifact splits into chunks
+that can be shared, compared, or report-built per day.
+* **Merge reuses FR-8.7's rules unchanged** — identity dedupe, views recomputed over the merged set,
+  threshold mismatch refused unless `--allow-mixed`, output independent of argument order. It must
+  not develop a second, laxer notion of "the same detection" than `report` uses.
+* **Both are lossless at file-block level.** An artifact's `files[]` entries carry `analysis` and
+  `quality_flags` (DC offset, clipping, silence) as well as `media` and `detections`; a merge or split
+  that reassembles output from parsed detections alone silently discards the data-quality record.
+  This is why `load_run` must retain the raw blocks (see R17).
+* **The split unit is the recording.** Detections belong to a file whose offsets (`t_start_s`) are
+  file-relative, and the evidence figures seek into that file at those offsets — slicing a detection
+  across two artifacts would make `t_start_s` mean part-relative time while the figure still cropped
+  the whole file. A recording whose detections cross a bucket boundary therefore stays whole in its
+  `capture_start` bucket, and the run reports how many straddled. **Detections are never duplicated
+  across parts**: two parts each holding one copy re-merge into a doubled census with nothing
+  internally inconsistent about it.
+* **Views are recomputed per part**, never sliced from the parent's `sources`/`timeline`/`recurrence`
+  aggregates — a daily part that lists a source with no detections inside it is a lie about that day.
+* **Naming**: `scan-<bucket>.json` in one directory, bucket = `20261023T07` (hour), `20261023` (day),
+  `2026-10` (month), so `ls` sorts chronologically. Empty buckets write nothing and appear as such in
+  the printed manifest.
+* **Never overwrite silently.** An existing `-o` target or a colliding part name is an error unless
+  `--force`; overwriting an artifact is data loss, and these files are the memory `--incremental`
+  reads (FR-8.8).
+* **Round-trip invariants, tested**: `merge(split(X, hour))` reproduces X's detection set, its file
+  blocks, and its coverage span; `split(merge(A,B), day)` groups exactly the union of their files.
+
 ### FR-9 CLI (surface, names may change)
 ```
 audioanalyzer scan  FILE...         [-c cfg.toml] [--mode standard|hr] [--min-prominence DB]
@@ -449,6 +480,8 @@ audioanalyzer scan  FILE...         [-c cfg.toml] [--mode standard|hr] [--min-pr
                                     [--figure-top N] [--no-figures]
 audioanalyzer report JSON...        -o report.html [--figures DIR] [--allow-mixed]
                                     (build from 1..N artifacts; never opens audio)  [FR-8.7]
+audioanalyzer merge  JSON...        -o OUT.json [--allow-mixed] [--force]           [FR-8.9]
+audioanalyzer split  JSON           --by hour|day|month [--dir DIR] [--force]       [FR-8.9]
 audioanalyzer daymap JSON           -o daymap.svg [--by-day] [--lanes N] [--lane-h PX]
                                     [--map-lo/--map-hi/--map-cut/--map-bucket]
 audioanalyzer profile  REF...       -o baseline.npz
@@ -698,7 +731,8 @@ Still open (do not block M1 on these):
 | R13 | A4's real-audio false-positive rate is unmeasured — synthetic rumble says 0/hour, one real hour said 73–205/hour | Report events per hour and per band so the noise is visible; `--class tonal` to suppress; needs a labelled ~2 h listening pass to set the operating point |
 | R14 | **Environment and parallelism fail late, not early.** A missing optional dep (matplotlib) surfaced only at the report step of a 38-minute run; and a naive parallel sweep either oversubscribes FFT threads (worker measured ~205 % CPU, so `cores` workers thrash) or multiplies a 210 MB working set past free RAM | `--report` and every input file are checked before analysis starts (exit 1/2 in seconds); extras declared in `pyproject.toml`; worker count auto-sized `min(cores/2, MemAvailable/260 MB)` with `-J` to override; corpus views assembled in the parent in input order so parallel and serial output are byte-identical |
 | R15 | **A broad `except Exception` in a rendering path turns a total failure into a plausible-looking output.** `spectrogram_crop` raised on 100 % of calls and the report shipped 12 cards with 12 images — waveforms only, no spectrograms — for the entire reference day, undetected, because the HTML test asserted the absence of external URLs rather than the presence of evidence | Crops must not be optional in the artifact-only design: figure cache (FR-8.2c) plus a test asserting a real detection's card carries **two** images; rendering failures must appear as a visible card-level warning, never a silent empty string |
-| R16 | **Merging artifacts can double-count or silently compare different thresholds.** Two runs over the same directory (different path spellings, or a rescanned night) describe the same detections; and a run under different gates produces confidences that are not comparable in one column | Detection identity is `(basename, frames, key())`, never the stored path; corpus views are recomputed over the merged set rather than merged; mismatched config/version fingerprints abort unless `--allow-mixed`, which then labels per section (FR-8.7) |
+| R16 | **Merging artifacts can double-count or silently compare different thresholds.** Two runs over the same directory (different path spellings, or a rescanned night) describe the same detections; and a run under different gates produces confidences that are not comparable in one column | Detection identity is exact — `(basename, frames, class, frequency, start)` — never the stored path, and never `key()`, whose minute bucket collided detections *within* one run and lost 47 % of a census; corpus views are recomputed over the merged set rather than merged; mismatched config/version fingerprints abort unless `--allow-mixed`, which then labels per section (FR-8.7) |
+| R17 | **An artifact loader can be lossy and still pass every test.** `load_run` (FR-8.7) reconstructs `media` + `detections` and dropped each file's `analysis` and `quality_flags` block — invisible while the only consumer was `report`, but `merge`/`split` (FR-8.9) write artifacts, so using it there would quietly discard the data-quality record (DC offset, clipping, silence) | `Run` carries the raw per-file blocks verbatim; a test asserts a merged/split artifact retains every input's `quality_flags` and `analysis`, and the round-trip invariants compare file blocks, not just detection counts |
 
 ---
 
